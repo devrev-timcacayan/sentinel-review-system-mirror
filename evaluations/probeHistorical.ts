@@ -39,7 +39,7 @@ function runProbe(id: string, sha: string): void {
     sourceRepository: 'devrev/sentinel',
     pullRequest: 513,
     sourceSha: sha,
-    policy: JSON.parse(readFileSync(resolve(SYSTEM_ROOT, '.devin/review-system.json'), 'utf8')) as unknown,
+    policy: JSON.parse(readFileSync(resolve(SYSTEM_ROOT, 'policy/review-system.json'), 'utf8')) as unknown,
     sources,
   };
   const requestPath = resolve(outputDir, 'request.json');

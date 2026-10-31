@@ -20,7 +20,7 @@ parent plus the assembled envelope remains the sole final gate.
   real review or PR approval.
 - `--provider bedrock` needs `--provider-config FILE`, `--max-spend-usd USD`,
   and `--execute`. The example config at
-  `.devin/bedrock-provider.example.json` is deliberately null and cannot run;
+  `policy/bedrock-provider.example.json` is deliberately null and cannot run;
   credentials, model identity, capabilities, prices, and spend limits remain
   unverified until a human supplies a verified configuration.
 

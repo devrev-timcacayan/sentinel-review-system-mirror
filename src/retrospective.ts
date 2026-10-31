@@ -105,8 +105,8 @@ export function prepareRetrospective(
       limitations,
       candidates: [],
       prompts: {
-        review: '.devin/review.prompt.md',
-        retrospective: '.devin/retrospective.prompt.md',
+        review: 'policy/review.prompt.md',
+        retrospective: 'policy/retrospective.prompt.md',
       },
       policyDigest,
     };

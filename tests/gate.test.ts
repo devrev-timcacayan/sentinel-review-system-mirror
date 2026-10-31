@@ -5,7 +5,7 @@ import { DIMENSIONS } from '../src/contracts.ts';
 import type { Evidence, Finding, ReviewLedger, ReviewPolicy, ReviewReport, ReviewSnapshot } from '../src/contracts.ts';
 import { evaluateReview } from '../src/gate.ts';
 
-const POLICY: ReviewPolicy = JSON.parse(readFileSync(new URL('../.devin/review-system.json', import.meta.url), 'utf8')) as ReviewPolicy;
+const POLICY: ReviewPolicy = JSON.parse(readFileSync(new URL('../policy/review-system.json', import.meta.url), 'utf8')) as ReviewPolicy;
 const FIRST_SHA = 'a'.repeat(40);
 const NEXT_SHA = 'b'.repeat(40);
 const BASE_SHA = 'c'.repeat(40);

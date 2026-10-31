@@ -6,12 +6,12 @@ import { DIMENSIONS } from './contracts.ts';
 import type { ReviewPolicy } from './contracts.ts';
 
 const TRUSTED_PATHS = [
-  '.devin/review-system.json',
-  '.devin/review.prompt.md',
-  '.devin/retrospective.prompt.md',
-  '.devin/partition.prompt.md',
-  '.devin/runner.prompt.md',
-  '.devin/evidence-repair.prompt.md',
+  'policy/review-system.json',
+  'policy/review.prompt.md',
+  'policy/retrospective.prompt.md',
+  'policy/partition.prompt.md',
+  'policy/runner.prompt.md',
+  'policy/evidence-repair.prompt.md',
   'src/artifactFiles.ts',
   'src/bedrockProvider.ts',
   'src/cli.ts',
@@ -125,7 +125,7 @@ export function loadPolicy(systemRoot: string = defaultSystemRoot()): LoadedPoli
     if (!resolved.startsWith(root + path.sep)) throw new Error(`Trusted path escapes system root: ${trustedPath}`);
     files.set(trustedPath, readFileSync(resolved));
   }
-  const configText = files.get('.devin/review-system.json')?.toString('utf8');
+  const configText = files.get('policy/review-system.json')?.toString('utf8');
   if (configText === undefined) throw new Error('Trusted policy config is missing.');
   let parsed: unknown;
   try {
@@ -133,15 +133,15 @@ export function loadPolicy(systemRoot: string = defaultSystemRoot()): LoadedPoli
   } catch (error) {
     throw new Error(`Trusted policy config is not valid JSON: ${(error as Error).message}`);
   }
-  const policy = validatePolicy(parsed, '.devin/review-system.json');
+  const policy = validatePolicy(parsed, 'policy/review-system.json');
   return {
     policy,
     digest: policyDigest(files),
-    reviewPrompt: files.get('.devin/review.prompt.md')?.toString('utf8') ?? '',
-    retrospectivePrompt: files.get('.devin/retrospective.prompt.md')?.toString('utf8') ?? '',
-    partitionPrompt: files.get('.devin/partition.prompt.md')?.toString('utf8') ?? '',
-    runnerPrompt: files.get('.devin/runner.prompt.md')?.toString('utf8') ?? '',
-    evidenceRepairPrompt: files.get('.devin/evidence-repair.prompt.md')?.toString('utf8') ?? '',
+    reviewPrompt: files.get('policy/review.prompt.md')?.toString('utf8') ?? '',
+    retrospectivePrompt: files.get('policy/retrospective.prompt.md')?.toString('utf8') ?? '',
+    partitionPrompt: files.get('policy/partition.prompt.md')?.toString('utf8') ?? '',
+    runnerPrompt: files.get('policy/runner.prompt.md')?.toString('utf8') ?? '',
+    evidenceRepairPrompt: files.get('policy/evidence-repair.prompt.md')?.toString('utf8') ?? '',
     responseContract: files.get('src/contracts.ts')?.toString('utf8') ?? '',
   };
 }

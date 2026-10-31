@@ -15,9 +15,9 @@ function stateRoot(): string {
   return mkdtempSync(path.join(tmpdir(), 'srs-retro-'));
 }
 
-function devinHashes(): Map<string, string> {
+function policyHashes(): Map<string, string> {
   const hashes = new Map<string, string>();
-  const dir = path.join(SYSTEM_ROOT, '.devin');
+  const dir = path.join(SYSTEM_ROOT, 'policy');
   for (const name of readdirSync(dir)) {
     hashes.set(name, createHash('sha256').update(readFileSync(path.join(dir, name))).digest('hex'));
   }
@@ -43,7 +43,7 @@ test('merged close events produce a needs-human-verification draft with history'
   assert.equal(draft.reviewHistory.length, 1);
   assert.equal(draft.reviewHistory[0]?.runId, 'run-1');
   assert.deepEqual(draft.limitations, []);
-  assert.equal(draft.prompts.retrospective, '.devin/retrospective.prompt.md');
+  assert.equal(draft.prompts.retrospective, 'policy/retrospective.prompt.md');
   assert.equal(draft.policyDigest, loaded.digest);
 });
 
@@ -87,14 +87,14 @@ test('a PR with no recorded runs is an explicit limitation, not a blank draft', 
   assert.ok(draft.limitations.some((line) => line.includes('No recorded review runs')));
 });
 
-test('retrospective preparation never writes the trusted .devin policy directory', (): void => {
+test('retrospective preparation never writes the trusted policy directory', (): void => {
   const root = stateRoot();
   const loaded = loadTestPolicy();
   seededStore(root);
-  const before = devinHashes();
+  const before = policyHashes();
   const event = validateCloseEvent({ action: 'closed', merged: true, headSha: FIRST_SHA, eventId: 'evt-policy-safe' });
   const { draftPath } = prepareRetrospective(root, ALLOWED_REPOSITORY, 17, event, loaded.digest);
-  const after = devinHashes();
+  const after = policyHashes();
   assert.deepEqual(after, before);
   assert.ok(draftPath.startsWith(root));
   assert.ok(readRuns(prStore(root, ALLOWED_REPOSITORY, 17)).length >= 1);
