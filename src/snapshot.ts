@@ -7,11 +7,14 @@ import type { Change, DependencyEdge, ReviewSnapshot, SizeAssessment, SourceFile
 
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/;
-const SOURCE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts'] as const;
+const SOURCE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.d.ts', '.js', '.jsx', '.mjs', '.cjs'] as const;
 const PROBE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.d.ts'] as const;
 const INVENTORY_EXCLUDED_SEGMENTS = new Set([
   'node_modules', 'test-results', 'playwright-report', 'blob-report', 'coverage', 'dist', '.artifacts', '.worktrees', '.state',
 ]);
+// Well-known empty tree; pins the gitattributes source so repository-controlled attributes
+// (.gitattributes, core.attributesFile) cannot alter diff classification or content.
+const EMPTY_TREE_SHA = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 
 export interface CollectSnapshotOptions {
   checkout: string;
@@ -56,9 +59,10 @@ function isForbiddenRepoPath(value: string): boolean {
 }
 
 function git(checkout: string, args: string[], input?: string | Buffer): Buffer {
-  const result = spawnSync('git', ['-C', checkout, ...args], {
+  const result = spawnSync('git', ['-C', checkout, '-c', 'core.attributesFile=/dev/null', ...args], {
     input,
     maxBuffer: 512 * 1024 * 1024,
+    env: { ...process.env, GIT_ATTR_SOURCE: EMPTY_TREE_SHA },
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {
@@ -129,7 +133,24 @@ function countChangedLines(checkout: string, fromSha: string, toSha: string): nu
     if (firstTab < 0 || secondTab < 0) throw new Error(`Unexpected git numstat record: ${record}`);
     const addedText = record.slice(0, firstTab);
     const deletedText = record.slice(firstTab + 1, secondTab);
-    if (addedText === '-' && deletedText === '-') continue;
+    if (addedText === '-' && deletedText === '-') {
+      let headPath = record.slice(secondTab + 1);
+      let basePath = headPath;
+      if (secondTab === record.length - 1) {
+        basePath = records[index + 1];
+        headPath = records[index + 2];
+        index += 2;
+      }
+      const headBlob = readBlob(checkout, toSha, headPath);
+      const probe = headBlob === 'missing' ? readBlob(checkout, fromSha, basePath) : headBlob;
+      if (probe === 'missing' || !probe.includes(0)) {
+        throw new Error(
+          `Preparation refused: git produced no changed-line count for ${headPath}; `
+          + 'an attribute-classified or otherwise uncounted text change cannot pass the cumulative size gate.',
+        );
+      }
+      continue;
+    }
     const added = Number(addedText);
     const deleted = Number(deletedText);
     if (!Number.isSafeInteger(added) || !Number.isSafeInteger(deleted) || added < 0 || deleted < 0) {
@@ -298,7 +319,7 @@ function resolveSpecifier(
 
 function isSourceInventoryPath(filePath: string): boolean {
   if (!SOURCE_EXTENSIONS.some((ext: string): boolean => filePath.endsWith(ext))) return false;
-  return !filePath.split('/').some((segment: string): boolean => segment.startsWith('.') || INVENTORY_EXCLUDED_SEGMENTS.has(segment));
+  return !filePath.split('/').some((segment: string): boolean => INVENTORY_EXCLUDED_SEGMENTS.has(segment));
 }
 
 interface RevisionGraph {
@@ -432,6 +453,7 @@ export function collectSnapshot(options: CollectSnapshotOptions, loaded: LoadedP
     ],
     changes,
     additionalContextPaths: additionalContext,
+    policyContextPaths: policy.contextPaths,
   });
   const dependencyEdges = plannerResult.dependencyEdges;
   const { limitation: tsconfigLimitation } = loadTsconfigPaths(options.checkout, headSha, headTree);

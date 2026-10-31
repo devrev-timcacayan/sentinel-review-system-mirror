@@ -29,6 +29,7 @@ function parseFixture(path: string): { config: ReviewProviderConfig; steps: Map<
   if (Object.keys(input).length !== expected.length || !expected.every((key) => key in input)) fail('unexpected fields');
   if (input.schemaVersion !== 1 || input.kind !== 'mock-review-provider') fail('schemaVersion/kind');
   if (!isObject(input.config)) fail('config must be an object');
+  if (input.config.provider !== 'mock') fail('config.provider must be mock; a fixture cannot impersonate a real provider');
   if (!Array.isArray(input.steps)) fail('steps must be an array');
   const steps = new Map<string, MockStep>();
   for (const step of input.steps as unknown[]) {

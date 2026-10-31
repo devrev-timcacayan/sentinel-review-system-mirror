@@ -163,6 +163,7 @@ export async function runPartitionReview(
     schemaVersion: 1,
     kind: 'partitioned-review',
     manifestDigest: parent.partitionManifest?.digest ?? '0'.repeat(64),
+    synthetic,
     reports: [],
   };
 
@@ -365,9 +366,11 @@ async function attemptRepair(
   };
   attempts.push(record);
   let reserved = 0;
+  let reservationHeld = false;
+  let invocationStarted = false;
   let settled = false;
   const settleOnce = (actual: number): void => {
-    if (settled) return;
+    if (settled || !reservationHeld) return;
     settled = true;
     budget.settle(reserved, actual);
     record.settledCostMicros = actual;
@@ -379,7 +382,9 @@ async function attemptRepair(
     reserved = requestCostMicros(config, counted, config.maxOutputTokens);
     record.reservedCostMicros = reserved;
     budget.reserve(reserved);
+    reservationHeld = true;
     writeJson(`${dir}/intent.json`, { requestHash: hash, countedInputTokens: counted, reservedCostMicros: reserved });
+    invocationStarted = true;
     const reply = await provider.invoke(request, path.join(outDir, dir));
     writeJson(`${dir}/response.json`, reply);
     record.responsePath = path.join(outDir, dir, 'response.json');
@@ -418,11 +423,11 @@ async function attemptRepair(
   } catch (error) {
     record.issues.push((error as Error).message);
     try {
-      settleOnce(reserved);
+      settleOnce(invocationStarted ? reserved : 0);
     } catch {
       // Already settled.
     }
-    outcome.uncertain = true;
+    outcome.uncertain = invocationStarted;
     outcome.stop = true;
     return outcome;
   }

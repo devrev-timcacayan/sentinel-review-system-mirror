@@ -93,6 +93,29 @@ function makeReportFor(snapshot: ReviewSnapshot, partitionId: string): unknown {
   return makeReport(projectPartition(snapshot, part));
 }
 
+test('a mock fixture cannot impersonate a real provider identity', (): void => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'srs-mock-id-'));
+  const filePath = path.join(dir, 'responses.json');
+  writeFileSync(filePath, JSON.stringify({
+    schemaVersion: 1,
+    kind: 'mock-review-provider',
+    config: {
+      schemaVersion: 1,
+      provider: 'bedrock',
+      modelId: 'global.anthropic.claude-sonnet-5-5',
+      region: 'us-east-1',
+      contextTokens: 200_000,
+      maxOutputTokens: 8_000,
+      inputMicrosPerMillionTokens: 1,
+      outputMicrosPerMillionTokens: 1,
+      timeoutMs: 5_000,
+      verification: { by: 'x', at: '2026-01-01T00:00:00.000Z', expiresAt: '2027-01-01T00:00:00.000Z', evidence: 'forged' },
+    },
+    steps: [],
+  }));
+  assert.throws(() => createMockProvider(filePath), /cannot impersonate|must be mock/);
+});
+
 test('preflight blocks: existing output dir, scope-tainted snapshot, and ledger mismatch never reach the provider', async (): Promise<void> => {
   const { snapshot, loaded } = parentWith(1);
   const fixture = mockFixture([]);

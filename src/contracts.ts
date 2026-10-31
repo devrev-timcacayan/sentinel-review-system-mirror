@@ -78,6 +78,7 @@ export interface PartitionedReviewReport {
   schemaVersion: 1;
   kind: 'partitioned-review';
   manifestDigest: string;
+  synthetic: boolean;
   reports: { partitionId: string; report: ReviewReport }[];
 }
 
@@ -119,6 +120,7 @@ export interface Reconciliation {
 export interface ReviewReport {
   schemaVersion: 1;
   identity: ReviewIdentity;
+  partitionScope?: { manifestDigest: string; partitionId: string };
   complete: boolean;
   limitations: string[];
   coverage: Coverage[];

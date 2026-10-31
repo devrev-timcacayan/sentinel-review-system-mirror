@@ -43,9 +43,9 @@ export function evaluatePartitionedReview(
     return incomplete([error instanceof Error ? error.message : String(error)]);
   }
   const manifest = snapshot.partitionManifest!;
-  if (!hasKeys(input, ['schemaVersion', 'kind', 'manifestDigest', 'reports'])
+  if (!hasKeys(input, ['schemaVersion', 'kind', 'manifestDigest', 'synthetic', 'reports'])
     || input.schemaVersion !== 1 || input.kind !== 'partitioned-review'
-    || input.manifestDigest !== manifest.digest || !Array.isArray(input.reports)) {
+    || input.manifestDigest !== manifest.digest || typeof input.synthetic !== 'boolean' || !Array.isArray(input.reports)) {
     return incomplete(['Partition report envelope does not match this exact manifest.']);
   }
   const reportMap = new Map<string, unknown>();
@@ -59,11 +59,23 @@ export function evaluatePartitionedReview(
   }
   const missing = manifest.partitions.filter((partition): boolean => !reportMap.has(partition.id));
   const reasons = missing.map((partition): string => `Required partition ${partition.id} is missing.`);
+  const sharedPaths = new Set(manifest.sharedSourceKeys.map((key: string): string => key.slice(key.indexOf(':') + 1)));
   for (const partition of manifest.partitions) {
     if (!reportMap.has(partition.id)) continue;
     const decision = evaluateSingle(projectPartition(snapshot, partition), reportMap.get(partition.id), previous, policy);
     decisions.push(decision);
-    if (decision.status === 'incomplete') reasons.push(...decision.reasons.map((reason): string => `${partition.id}: ${reason}`));
+    if (decision.status === 'incomplete') {
+      reasons.push(...decision.reasons.map((reason): string => `${partition.id}: ${reason}`));
+      continue;
+    }
+    const report = reportMap.get(partition.id) as ReviewReport;
+    const acknowledged = new Set(report.coverage.flatMap((entry: Coverage): string[] => entry.relatedPaths));
+    for (const key of partition.sourceKeys) {
+      const assignedPath = key.slice(key.indexOf(':') + 1);
+      if (!sharedPaths.has(assignedPath) && !acknowledged.has(assignedPath)) {
+        reasons.push(`${partition.id}: assigned context root ${assignedPath} is not acknowledged by coverage relatedPaths.`);
+      }
+    }
   }
   if (reasons.length > 0) return incomplete(reasons);
 

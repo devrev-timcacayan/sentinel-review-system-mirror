@@ -104,11 +104,22 @@ function isSize(value: unknown): value is SizeAssessment {
     && ['within_threshold', 'split_recommended'].includes(String(value.outcome));
 }
 
+function isPartitionScope(value: unknown): value is { manifestDigest: string; partitionId: string } {
+  return isObject(value)
+    && hasKeys(value, ['manifestDigest', 'partitionId'])
+    && typeof value.manifestDigest === 'string' && /^[0-9a-f]{64}$/.test(value.manifestDigest)
+    && typeof value.partitionId === 'string' && /^part-[0-9]{3,}$/.test(value.partitionId);
+}
+
 function isReport(value: unknown): value is ReviewReport {
   return isObject(value)
-    && hasKeys(value, ['schemaVersion', 'identity', 'complete', 'limitations', 'coverage', 'findings', 'reconciliations'])
+    && hasKeys(value, [
+      'schemaVersion', 'identity', 'complete', 'limitations', 'coverage', 'findings', 'reconciliations',
+      ...(value.partitionScope !== undefined ? ['partitionScope'] : []),
+    ])
     && value.schemaVersion === 1
     && isIdentity(value.identity)
+    && (value.partitionScope === undefined || isPartitionScope(value.partitionScope))
     && typeof value.complete === 'boolean'
     && isStringArray(value.limitations)
     && Array.isArray(value.coverage) && value.coverage.every(isCoverage)
@@ -212,6 +223,12 @@ function evaluateSingleReview(
   if (!isReport(input)) return invalid('Report does not match the strict review-report contract.');
   const report = input;
   if (!sameIdentity(snapshot.identity, report.identity)) return invalid('Report identity does not match this exact snapshot and run.');
+  const scope = snapshot.partitionScope ?? null;
+  const reportScope = report.partitionScope ?? null;
+  if (scope === null && reportScope !== null) return invalid('Report carries a partition scope but the snapshot is not a partition.');
+  if (scope !== null && (reportScope === null || reportScope.manifestDigest !== scope.manifestDigest || reportScope.partitionId !== scope.partitionId)) {
+    return invalid('Report partition scope does not match the assigned partition manifest.');
+  }
 
   const reasons: string[] = [];
   const add = (reason: string): void => { reasons.push(reason); };

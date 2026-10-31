@@ -161,6 +161,46 @@ test('record evaluates under lock, persists, and replays identical submissions',
   assert.match(conflict.stderr, /different content/);
 });
 
+test('a replayed historical pass is marked superseded once newer state intervenes', (): void => {
+  const prepared = makePreparedRepo();
+  assert.equal(cli(prepareArgs(prepared)).status, 0);
+  const snapshotPath = path.join(prepared.outDir, 'snapshot.json');
+  const reportPath = writeReport(prepared, passingReport(readSnapshot(prepared)));
+  assert.equal(cli(['record', '--snapshot', snapshotPath, '--report', reportPath, '--state-root', prepared.stateRoot]).status, 0);
+
+  prepared.repo.write('src/b.ts', 'export const b = 1;\n');
+  const head2 = prepared.repo.commit('second push');
+  const out2 = mkdtempSync(path.join(tmpdir(), 'srs-cli-out4-'));
+  const rerun = cli(prepareArgs(prepared, { overrides: { 'run-id': 'run-cli-2', head: head2, out: out2 } }));
+  assert.equal(rerun.status, 0, rerun.stderr);
+  const snapshot2 = JSON.parse(readFileSync(path.join(out2, 'snapshot.json'), 'utf8')) as ReviewSnapshot;
+  const blockerReport = {
+    ...(passingReport(snapshot2) as Record<string, unknown>),
+    findings: [{
+      id: 'F-2',
+      ruleId: 'SR-002',
+      severity: 'blocker',
+      title: 'Required setup bypassed',
+      explanation: 'Mechanism shown.',
+      impact: 'Reachable consequence.',
+      introducedBy: { path: 'src/b.ts', revision: 'head', startLine: 1, endLine: 1, quote: 'export const b = 1;' },
+      evidence: [{ path: 'src/b.ts', revision: 'head', startLine: 1, endLine: 1, quote: 'export const b = 1;' }],
+      counterEvidence: ['Checked.'],
+    }],
+  };
+  const blockerPath = path.join(out2, 'report.json');
+  writeFileSync(blockerPath, `${JSON.stringify(blockerReport)}\n`);
+  const blocked = cli(['record', '--snapshot', path.join(out2, 'snapshot.json'), '--report', blockerPath, '--state-root', prepared.stateRoot]);
+  assert.equal(blocked.status, 2, blocked.stderr);
+
+  const replay = cli(['record', '--snapshot', snapshotPath, '--report', reportPath, '--state-root', prepared.stateRoot]);
+  assert.equal(replay.status, 3, 'a superseded historical pass must not exit 0');
+  const out = JSON.parse(replay.stdout);
+  assert.equal(out.replayed, true);
+  assert.equal(out.superseded, true);
+  assert.equal(out.decision.status, 'pass', 'historical decision returned as data only');
+});
+
 test('record exit codes distinguish pass, changes_required, and incomplete', (): void => {
   const prepared = makePreparedRepo();
   assert.equal(cli(prepareArgs(prepared)).status, 0);

@@ -228,8 +228,9 @@ function commandRecord(args: string[]): number {
   const snapshot = validateSnapshot(parseJsonFile(flags.get('snapshot') as string, 'snapshot'), loaded);
   const report = parseJsonFile(flags.get('report') as string, 'report');
   const stateRoot = path.resolve(flags.get('state-root') ?? defaultStateRoot(systemRoot));
-  const { decision, replayed } = recordReview(stateRoot, snapshot, report, loaded.policy);
-  console.log(JSON.stringify({ replayed, decision }, null, 2));
+  const { decision, replayed, superseded } = recordReview(stateRoot, snapshot, report, loaded.policy);
+  console.log(JSON.stringify({ replayed, superseded, decision }, null, 2));
+  if (superseded) return 3;
   if (decision.status === 'pass') return 0;
   if (decision.status === 'changes_required') return 2;
   return 3;

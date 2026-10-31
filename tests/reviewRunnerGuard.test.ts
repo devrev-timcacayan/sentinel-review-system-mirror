@@ -81,6 +81,39 @@ test('a counting or reservation failure releases every held uninvoked reservatio
   assert.equal(result.decision.status, 'incomplete');
 });
 
+test('a failed repair reservation releases at zero and never touches held reservations', async (): Promise<void> => {
+  const { snapshot, loaded } = parent(2);
+  const [first] = snapshot.partitionManifest!.partitions;
+  const repairable = makeReport(projectPartition(snapshot, first), {
+    findings: [{
+      id: 'f-repair',
+      ruleId: 'novel',
+      severity: 'advisory',
+      title: 'issue',
+      explanation: 'ex',
+      impact: 'im',
+      introducedBy: { path: 'src/root.ts', revision: 'head', startLine: 1, endLine: 1, quote: 'export const root = 2;' },
+      evidence: [{ path: 'src/root.ts', revision: 'head', startLine: 1, endLine: 1, quote: 'INVENTED QUOTE' }],
+      counterEvidence: [],
+    }],
+  });
+  let invokes = 0;
+  const result = await runPartitionReview(snapshot, ledger(), loaded, provider(
+    async (request: ProviderRequest): Promise<number> => (request.phase === 'repair' ? 5 : 10),
+    async (request: ProviderRequest): Promise<ProviderReply> => {
+      invokes += 1;
+      return wrapped(snapshot, request.partitionId, request.partitionId === first.id ? repairable : undefined);
+    },
+  ), { outputDirectory: path.join(mkdtempSync(path.join(tmpdir(), 'srs-guard1b-')), 'out'), maxSpendMicros: 2020, execute: false });
+  const repair = result.attempts.find((attempt) => attempt.phase === 'repair');
+  assert.ok(repair, 'the repair attempt must be recorded');
+  assert.equal(repair.status, 'failed');
+  assert.equal(invokes, 1, 'remaining invokes stop after the failed reservation');
+  assert.equal(result.budget.reservedMicros, '0', 'the held initial reservation must release cleanly');
+  assert.equal(result.budget.spentMicros, '15', 'no phantom spend may be charged against another call');
+  assert.equal(result.uncertainCharges, false, 'a pre-invocation failure is certain, not uncertain');
+});
+
 test('a structurally parsed non-repairable report is retained and remaining invokes stop', async (): Promise<void> => {
   const { snapshot, loaded } = parent(2);
   const [first, second] = snapshot.partitionManifest!.partitions;

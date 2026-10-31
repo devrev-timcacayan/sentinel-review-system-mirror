@@ -38,7 +38,9 @@ parent plus the assembled envelope remains the sole final gate.
    bound, and text-only content. Transport failure, invalid usage, or usage
    overrun charges the full reservation conservatively, marks
    `uncertainCharges`, and stops remaining invokes. Uninvoked reservations are
-   released at zero cost.
+   released at zero cost. Reservations are owned per call: a count, fit, or
+   reserve failure settles nothing and is certain, and only a started provider
+   call can produce a conservative charge or `uncertainCharges`.
 4. `inspectModelResponse` scopes each reply to its partition; only a
    citation-only repair is permitted once per part, separately counted and
    reserved, and must satisfy `isCitationOnlyRepair` (no dropped findings,
@@ -47,7 +49,8 @@ parent plus the assembled envelope remains the sole final gate.
    the final gate stays incomplete.
 5. The assembled `PartitionedReviewReport` envelope is always evaluated by
    `evaluateReview`. Missing parts stay missing; no synthesized pass is ever
-   emitted.
+   emitted. The envelope carries `synthetic`; mock output writes
+   `synthetic: true` and `record` refuses to persist it as operational state.
 
 ## Accounting scope
 

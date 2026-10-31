@@ -122,6 +122,47 @@ test('document size thresholds warn above 800 and stop above 1500 cumulative cha
   assert.throws(() => collectSnapshot(baseOptions(oversized), loadTestPolicy({ contextPaths: [] })), /exceeding the agreed 1500-line limit|No review packet/);
 });
 
+test('repository git attributes cannot classify text changes out of the size gate', (): void => {
+  const small = makeRepo();
+  small.write('.gitattributes', '*.ts -diff\n');
+  small.write('src/a.ts', 'export const a = 1;\n');
+  small.commit('base');
+  small.git(['branch', 'base']);
+  small.write('src/a.ts', 'export const a = 1;\nexport const b = 2;\nexport const c = 3;\n');
+  small.commit('head');
+  small.git(['branch', '-f', 'head', 'HEAD']);
+  const counted = collectSnapshot(baseOptions(small), loadTestPolicy({ contextPaths: [] }));
+  assert.equal(counted.size.changedLines, 2, 'attribute-marked text must still produce real line counts');
+
+  const repo = makeRepo();
+  repo.write('.gitattributes', '*.ts -diff\n');
+  repo.write('src/large.ts', 'export const base = 1;\n');
+  repo.commit('base');
+  repo.git(['branch', 'base']);
+  repo.write('src/large.ts', `${'export const line = 1;\n'.repeat(1501)}`);
+  repo.commit('head');
+  repo.git(['branch', '-f', 'head', 'HEAD']);
+  assert.throws(
+    () => collectSnapshot(baseOptions(repo), loadTestPolicy({ contextPaths: [] })),
+    /1500-line limit|exceeding the agreed/,
+  );
+});
+
+test('uncommitted attribute sources cannot hide numeric counts either', (): void => {
+  const repo = makeRepo();
+  repo.write('src/large.ts', 'export const base = 1;\n');
+  repo.commit('base');
+  repo.git(['branch', 'base']);
+  writeFileSync(path.join(repo.dir, '.git', 'info', 'attributes'), '*.ts -diff\n');
+  repo.write('src/large.ts', `${'export const line = 1;\n'.repeat(1501)}`);
+  repo.commit('head');
+  repo.git(['branch', '-f', 'head', 'HEAD']);
+  assert.throws(
+    () => collectSnapshot(baseOptions(repo), loadTestPolicy({ contextPaths: [] })),
+    /no changed-line count|cannot pass the cumulative size gate|1500-line limit/,
+  );
+});
+
 test('pure renames do not count as changed lines', (): void => {
   const repo = makeRepo();
   repo.write('src/old.ts', Array.from({ length: 1600 }, (_value, index) => `export const line${index} = ${index};`).join('\n') + '\n');
@@ -353,6 +394,40 @@ test('policy context files missing from the repository produce explicit limitati
   const snapshot = collectSnapshot(baseOptions(repo), loadTestPolicy());
   assert.equal(snapshot.complete, false);
   assert.ok(snapshot.limitations.some((line) => line.includes('CLAUDE.md')));
+});
+
+test('unchanged JavaScript and hidden-directory consumers are captured through the import graph', (): void => {
+  const repo = makeRepo();
+  repo.write('src/dep.ts', 'export const value = 1;\n');
+  repo.write('src/caller.js', 'import { value } from "./dep";\nexport const seen = value;\n');
+  repo.write('.generated/hidden.ts', 'import { value } from "../src/dep";\nexport const hidden = value;\n');
+  repo.commit('base');
+  repo.git(['branch', 'base']);
+  repo.write('src/dep.ts', 'export const value = 2;\n');
+  repo.commit('head');
+  repo.git(['branch', '-f', 'head', 'HEAD']);
+  const snapshot = collectSnapshot(baseOptions(repo), loadTestPolicy({ contextPaths: [] }));
+  assert.ok(snapshot.files.some((file) => file.path === 'src/caller.js'), 'unchanged .js consumer must be captured');
+  assert.ok(snapshot.dependencyEdges.some((edge) => edge.from === 'src/caller.js' && edge.to === 'src/dep.ts'));
+  assert.ok(snapshot.files.some((file) => file.path === '.generated/hidden.ts'), 'consumer in a dot-prefixed directory must be captured');
+  assert.ok(snapshot.dependencyEdges.some((edge) => edge.from === '.generated/hidden.ts' && edge.to === 'src/dep.ts'));
+});
+
+test('policy context forward dependencies are selected and dependency-closed', (): void => {
+  const repo = makeRepo();
+  repo.write('playwright.config.ts', 'import { setup } from "./src/setup";\nexport const config = setup;\n');
+  repo.write('src/setup.ts', 'export const setup = {};\n');
+  repo.write('src/a.ts', 'export const a = 1;\n');
+  repo.commit('base');
+  repo.git(['branch', 'base']);
+  repo.write('src/a.ts', 'export const a = 2;\n');
+  repo.commit('head');
+  repo.git(['branch', '-f', 'head', 'HEAD']);
+  const loaded = loadTestPolicy({ contextPaths: ['playwright.config.ts'] });
+  const snapshot = collectSnapshot(baseOptions(repo), loaded);
+  assert.equal(snapshot.complete, true);
+  assert.ok(snapshot.files.some((file) => file.path === 'src/setup.ts'), 'policy context forward dependency must be captured');
+  assert.ok(snapshot.dependencyEdges.some((edge) => edge.from === 'playwright.config.ts' && edge.to === 'src/setup.ts'));
 });
 
 test('seeded fixture satisfies the real trusted policy context set', (): void => {

@@ -294,7 +294,7 @@ test('partial envelope stays incomplete; full envelope records once and replays 
     const part = JSON.parse(readFileSync(partPath, 'utf8'));
     return { partitionId: part.partitionId as string, report: makeReport(part.snapshot) };
   });
-  const envelope = { schemaVersion: 1, kind: 'partitioned-review', manifestDigest, reports: rows };
+  const envelope = { schemaVersion: 1, kind: 'partitioned-review', manifestDigest, synthetic: false, reports: rows };
   const partial = { ...envelope, reports: rows.slice(0, -1) };
   const envelopePath = path.join(out1, 'envelope.json');
   writeFileSync(envelopePath, JSON.stringify(partial, null, 2));
@@ -312,7 +312,7 @@ test('partial envelope stays incomplete; full envelope records once and replays 
     return { partitionId: part.partitionId as string, report: makeReport(part.snapshot) };
   });
   const envelopePath2 = path.join(out2, 'envelope.json');
-  writeFileSync(envelopePath2, JSON.stringify({ schemaVersion: 1, kind: 'partitioned-review', manifestDigest: request2.manifest.digest, reports: rows2 }, null, 2));
+  writeFileSync(envelopePath2, JSON.stringify({ schemaVersion: 1, kind: 'partitioned-review', manifestDigest: request2.manifest.digest, synthetic: false, reports: rows2 }, null, 2));
   const fullRecord = cli(['record', '--snapshot', snapshotPath2, '--report', envelopePath2, '--state-root', stateRoot, '--system-root', SYSTEM_ROOT]);
   assert.equal(fullRecord.status, 0, `full mock envelope should pass: ${fullRecord.stderr}${fullRecord.stdout}`);
   const parent2 = JSON.parse(readFileSync(snapshotPath2, 'utf8'));

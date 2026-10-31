@@ -274,6 +274,51 @@ test('a run record stored under the wrong filename fails closed', (): void => {
   assert.throws(() => readLedger(store), /does not match runId|manual recovery/);
 });
 
+test('an identical replay after intervening state is flagged superseded, not a fresh pass', (): void => {
+  const root = stateRoot();
+  const loaded = loadTestPolicy();
+  const first = makeSnapshotFixture(loaded);
+  const clean = recordReview(root, first, makeReport(first), loaded.policy);
+  assert.equal(clean.decision.status, 'pass');
+  const second = makeSnapshotFixture(loaded, { headSha: NEXT_SHA, previousHeadSha: FIRST_SHA, runId: 'run-2' });
+  const blocked = recordReview(root, second, reportWithBlocker(second), loaded.policy);
+  assert.equal(blocked.decision.status, 'changes_required');
+  const replay = recordReview(root, first, makeReport(first), loaded.policy);
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.superseded, true, 'a newer ledger must prevent the old pass from standing as current state');
+  assert.equal(replay.decision.status, 'pass', 'the historical decision is returned as historical data only');
+  assert.equal(readLedger(prStore(root, ALLOWED_REPOSITORY, 17)).openFindings.length, 1);
+});
+
+test('reordering otherwise-valid journal lines fails closed', (): void => {
+  const root = stateRoot();
+  const loaded = loadTestPolicy();
+  const first = makeSnapshotFixture(loaded);
+  recordReview(root, first, makeReport(first), loaded.policy);
+  const second = makeSnapshotFixture(loaded, { headSha: NEXT_SHA, previousHeadSha: FIRST_SHA, runId: 'run-2' });
+  recordReview(root, second, reportWithBlocker(second), loaded.policy);
+  const store = prStore(root, ALLOWED_REPOSITORY, 17);
+  assert.equal(readLedger(store).openFindings.length, 1);
+  const lines = readFileSync(store.journalPath, 'utf8').split('\n').filter((line) => line.trim().length > 0);
+  writeFileSync(store.journalPath, `${lines[1]}\n${lines[0]}\n`);
+  assert.throws(() => readLedger(store), /monotonic|sequence|manual recovery/);
+  assert.throws(() => recordReview(root, first, makeReport(first), loaded.policy), /monotonic|sequence|manual recovery/);
+});
+
+test('a valid ledger cache without journal or runs requires manual recovery', (): void => {
+  const root = stateRoot();
+  const loaded = loadTestPolicy();
+  const snapshot = makeSnapshotFixture(loaded);
+  recordReview(root, snapshot, reportWithBlocker(snapshot), loaded.policy);
+  const store = prStore(root, ALLOWED_REPOSITORY, 17);
+  const cache = readFileSync(store.ledgerPath, 'utf8');
+  unlinkSync(store.journalPath);
+  rmRuns(store.runsDir);
+  writeFileSync(store.ledgerPath, cache);
+  assert.throws(() => readLedger(store), /without any journal or run history|manual recovery/);
+  assert.throws(() => recordReview(root, snapshot, makeReport(snapshot), loaded.policy), /without any journal or run history|manual recovery/);
+});
+
 test('recording is refused into journal-less state until manual restoration', (): void => {
   const root = stateRoot();
   const loaded = loadTestPolicy();

@@ -89,6 +89,17 @@ retrospective drafts. It does not run a model, publish reviews, or learn.
   fixture object) are recognized as declarative registration; unknown factories
   stay broad. Shadowed identifiers may over-include. Treat the static plan as
   review evidence, not proof of complete runtime impact.
+- Analysis scope: the import graph inventories TypeScript- and JavaScript-family
+  sources (`.ts/.tsx/.mts/.cts/.d.ts/.js/.jsx/.mjs/.cjs`), including files inside
+  dot-prefixed directories, minus the named excluded segments. Specifiers
+  resolve through literal paths, TS extension probing, index files, and
+  `tsconfig` paths. Non-JS-family importers, runtime plugin registration, and
+  importers reached through non-literal specifiers are outside the modeled
+  scope; unresolved internal specifiers are explicit limitations, never silent
+  omissions. Diff and changed-line measurement runs against a pinned empty
+  gitattributes source, so repository-controlled attributes cannot reclassify a
+  text change as binary and evade the cumulative size gate; a change with no
+  computable line count is refused rather than guessed.
 - Selected sets can still exceed policy limits. That produces `complete: false`
   with an explicit limitation; context is never silently narrowed to fit.
 - Earlier captured packets remain historical artifacts from a previous
@@ -105,18 +116,29 @@ retrospective drafts. It does not run a model, publish reviews, or learn.
   complete or bypass the missing-context barrier.
 - `record` accepts either an ordinary single snapshot plus a `ReviewReport`, or
   a parent snapshot carrying `partitionManifest` plus a strict
-  `PartitionedReviewReport` envelope containing every part's report. A
-  projected partition result or a partial envelope can never independently
-  clear the PR; missing, duplicated, or unknown partition reports and any
-  tampering fail closed to incomplete while preserving prior ledger state.
+  `PartitionedReviewReport` envelope containing every part's report. Each
+  nested report must carry `partitionScope` bound to its own manifest digest
+  and partition id, and must acknowledge that partition's uniquely assigned
+  context roots in coverage `relatedPaths`. A projected partition result or a
+  partial envelope can never independently clear the PR; missing, duplicated,
+  or unknown partition reports and any tampering fail closed to incomplete
+  while preserving prior ledger state. An envelope marked `synthetic: true`
+  (mock replay output) is refused outright at the recording boundary: synthetic
+  artifacts are evidence, never operational state. An identical re-submission
+  of a recorded run replays as a no-op, but when the authoritative ledger has
+  since advanced the outcome is returned with `superseded: true` and exit `3`:
+  a historical pass can never stand as current success.
 
 ## State store
 
 Per `stateRoot/repos/<owner>/<name>/prs/<N>/`: `runs/<runId>.json` immutable records,
 `journal.jsonl` authoritative ordered ledger history, `ledger.json` disposable cache, and
 `review.lock`. A single lock guards read-evaluate-write per PR; it is never broken
-automatically. Corrupt or inconsistent state (unparseable record, malformed journal line,
-unjournaled run, journal without a matching record, unusable cache with no valid history)
+automatically. Every journal line carries a monotonic `seq` and a `previousLedger`
+commitment chained to the prior entry, so reordering, duplicating, or splicing
+otherwise-valid lines cannot resurrect an older ledger. Corrupt or inconsistent state
+(unparseable record, malformed journal line, unjournaled run, journal without a
+matching record, unusable cache, or a valid cache with no journal or run history)
 fails closed with a recovery-required error naming the directory. Read-only ledger
 recovery from valid immutable runs is permitted when the journal is missing, but it does
 not authorize further writes: `record` refuses all runs (including replays) until the

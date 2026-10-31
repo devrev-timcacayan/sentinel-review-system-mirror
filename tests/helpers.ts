@@ -86,6 +86,7 @@ export function makeReport(snapshot: ReviewSnapshot, overrides: Partial<ReviewRe
   return {
     schemaVersion: 1,
     identity: structuredClone(snapshot.identity),
+    ...(snapshot.partitionScope ? { partitionScope: structuredClone(snapshot.partitionScope) } : {}),
     complete: true,
     limitations: [],
     coverage,

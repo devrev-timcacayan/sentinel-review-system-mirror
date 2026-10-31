@@ -69,16 +69,20 @@ function syntheticReport(snapshot: ReviewSnapshot): ReviewReport {
   return {
     schemaVersion: 1,
     identity: structuredClone(snapshot.identity),
+    ...(snapshot.partitionScope ? { partitionScope: structuredClone(snapshot.partitionScope) } : {}),
     complete: true,
     limitations: [],
     findings: [],
     reconciliations: [],
     coverage: snapshot.changes.flatMap((change) => {
       const own = new Set([change.path, ...(change.previousPath ? [change.previousPath] : [])]);
-      const relatedPaths = [...new Set(snapshot.dependencyEdges.flatMap((edge): string[] => [
-        ...(own.has(edge.from) ? [edge.to] : []),
-        ...(own.has(edge.to) ? [edge.from] : []),
-      ]).filter((filePath): boolean => !own.has(filePath)))].sort();
+      const relatedPaths = [...new Set([
+        ...snapshot.dependencyEdges.flatMap((edge): string[] => [
+          ...(own.has(edge.from) ? [edge.to] : []),
+          ...(own.has(edge.to) ? [edge.from] : []),
+        ]),
+        ...snapshot.files.map((file): string => file.path),
+      ].filter((filePath): boolean => !own.has(filePath)))].sort();
       return (['test-validity', 'reliability-impact', 'maintainability'] as const).map((dimension) => ({
         path: change.path,
         dimension,
@@ -135,6 +139,7 @@ function main(): void {
       const partitions = snapshot.partitionManifest!.partitions;
       const envelope: PartitionedReviewReport = {
         schemaVersion: 1, kind: 'partitioned-review', manifestDigest: snapshot.partitionManifest!.digest,
+        synthetic: true,
         reports: partitions.map((partition) => ({
           partitionId: partition.id, report: syntheticReport(projectPartition(snapshot, partition)),
         })),

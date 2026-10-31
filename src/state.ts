@@ -193,6 +193,8 @@ export function readRuns(store: PrStore): RunRecord[] {
 interface JournalEntry {
   runId: string;
   recordedAt: string;
+  seq: number;
+  previousLedger: ReviewLedger;
   ledger: ReviewLedger;
 }
 
@@ -214,12 +216,27 @@ function readJournal(store: PrStore, runs: RunRecord[]): JournalEntry[] | null {
     if (typeof parsed.recordedAt !== 'string' || parsed.recordedAt.trim().length === 0) {
       throw stateError(store, `journal line ${index + 1} missing recordedAt`, store.journalPath);
     }
+    if (!Number.isSafeInteger(parsed.seq) || (parsed.seq as number) < 1) {
+      throw stateError(store, `journal line ${index + 1} has an invalid sequence number`, store.journalPath);
+    }
     entries.push({
       runId: parsed.runId,
       recordedAt: parsed.recordedAt,
+      seq: parsed.seq as number,
+      previousLedger: validateLedgerShape(parsed.previousLedger, store, `${store.journalPath} line ${index + 1} previousLedger`),
       ledger: validateLedgerShape(parsed.ledger, store, `${store.journalPath} line ${index + 1}`),
     });
   });
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    if (entry.seq !== index + 1) {
+      throw stateError(store, `journal sequence ${entry.seq} at line ${index + 1} breaks the monotonic entry order`, store.journalPath);
+    }
+    const expectedPrevious = index === 0 ? emptyLedger(store.repository, store.pullRequest) : entries[index - 1].ledger;
+    if (canonicalJson(entry.previousLedger) !== canonicalJson(expectedPrevious)) {
+      throw stateError(store, `journal line ${index + 1} commits to a different previous ledger than the chain produces`, store.journalPath);
+    }
+  }
   const runsById = new Map(runs.map((run: RunRecord): [string, RunRecord] => [run.runId, run]));
   const journaled = new Set<string>();
   for (const entry of entries) {
@@ -277,7 +294,9 @@ function loadConsistentState(store: PrStore): ConsistentState {
       }
     }
   }
-  if (ledger === null && cached !== null) ledger = cached;
+  if (ledger === null && cached !== null) {
+    throw stateError(store, 'a valid ledger cache exists without any journal or run history; restore authoritative history before reading or recording', store.ledgerPath);
+  }
   if (ledger === null && (journal !== null || cacheCorrupt)) {
     throw stateError(store, 'persisted state exists but no complete valid ledger can be derived', store.dir);
   }
@@ -339,6 +358,7 @@ function writeLedgerCache(store: PrStore, ledger: ReviewLedger): void {
 export interface RecordOutcome {
   decision: GateDecision;
   replayed: boolean;
+  superseded: boolean;
 }
 
 export function recordReview(
@@ -361,6 +381,12 @@ export function recordReview(
         store.journalPath,
       );
     }
+    if (isObject(report) && (report as Record<string, unknown>).synthetic === true) {
+      throw new Error(
+        `Refusing to record synthetic review output for run ${runId}; `
+        + 'mock/synthetic artifacts are replay evidence and cannot update operational review state.',
+      );
+    }
     const existing = readRun(store, runId);
     if (existing !== null) {
       const identical = canonicalJson(existing.snapshot) === canonicalJson(snapshot)
@@ -368,7 +394,8 @@ export function recordReview(
       if (!identical) {
         throw new Error(`Run ${runId} already exists with different content; refusing to overwrite the immutable record at ${runPath}.`);
       }
-      return { decision: existing.decision, replayed: true };
+      const superseded = canonicalJson(existing.decision.ledger) !== canonicalJson(state.ledger);
+      return { decision: existing.decision, replayed: true, superseded };
     }
     const previous = state.ledger;
     const decision = evaluateReview(snapshot, report, previous, policy);
@@ -381,8 +408,14 @@ export function recordReview(
       decision,
     };
     writeFileExclusive(runPath, `${JSON.stringify(record, null, 2)}\n`);
-    appendFile(store.journalPath, `${JSON.stringify({ runId, recordedAt: record.recordedAt, ledger: decision.ledger })}\n`);
+    appendFile(store.journalPath, `${JSON.stringify({
+      runId,
+      recordedAt: record.recordedAt,
+      seq: (state.journal?.length ?? 0) + 1,
+      previousLedger: previous,
+      ledger: decision.ledger,
+    })}\n`);
     writeLedgerCache(store, decision.ledger);
-    return { decision, replayed: false };
+    return { decision, replayed: false, superseded: false };
   }, 'record');
 }

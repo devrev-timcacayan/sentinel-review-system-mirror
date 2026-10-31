@@ -58,6 +58,7 @@ function fixture(withPrior: boolean = false): {
     schemaVersion: 1,
     kind: 'partitioned-review',
     manifestDigest: snapshot.partitionManifest!.digest,
+    synthetic: false,
     reports: snapshot.partitionManifest!.partitions.map((partition) => ({
       partitionId: partition.id,
       report: makeReport(projectPartition(snapshot, partition), withPrior ? {
@@ -213,7 +214,7 @@ test('rehashed invalid plans cannot omit shared sources, closure, coverage, or b
     mutate(snapshot);
     rebind(snapshot);
     const envelope: PartitionedReviewReport = {
-      schemaVersion: 1, kind: 'partitioned-review', manifestDigest: snapshot.partitionManifest!.digest, reports: [],
+      schemaVersion: 1, kind: 'partitioned-review', manifestDigest: snapshot.partitionManifest!.digest, synthetic: false, reports: [],
     };
     const decision = evaluateReview(snapshot, envelope, previous, policy);
     assert.equal(decision.status, 'incomplete');
@@ -231,6 +232,76 @@ test('immutable state stores the whole bundle envelope and idempotently replays 
   const ledger = readLedger(prStore(root, snapshot.identity.repository, snapshot.identity.pullRequest));
   assert.equal(ledger.lastHeadSha, snapshot.identity.headSha);
   assert.equal(previous.lastHeadSha, null);
+});
+
+test('nested reports are bound to their assigned partition scope and context', (): void => {
+  const { snapshot, envelope, previous, policy } = fixture();
+  const unscoped = structuredClone(envelope);
+  delete (unscoped.reports[0].report as { partitionScope?: unknown }).partitionScope;
+  assert.equal(evaluateReview(snapshot, unscoped, previous, policy).status, 'incomplete');
+
+  const wrongScope = structuredClone(envelope);
+  wrongScope.reports[0].report.partitionScope = {
+    manifestDigest: snapshot.partitionManifest!.digest,
+    partitionId: snapshot.partitionManifest!.partitions[1].id,
+  };
+  assert.equal(evaluateReview(snapshot, wrongScope, previous, policy).status, 'incomplete');
+
+  const copied = structuredClone(envelope);
+  copied.reports[1].report = structuredClone(copied.reports[0].report);
+  const decision = evaluateReview(snapshot, copied, previous, policy);
+  assert.equal(decision.status, 'incomplete', 'a report copied into a second partition row must not stand');
+});
+
+test('each partition must acknowledge its uniquely assigned context roots', (): void => {
+  const loaded = loadTestPolicy({ contextPaths: [] });
+  const policy = { ...loaded.policy, limits: { ...loaded.policy.limits, maxFiles: 4 } };
+  const input = makeSnapshotFixture(loaded);
+  for (const name of ['consumerB', 'consumerC', 'consumerD']) {
+    input.files.push({ path: `tests/${name}.ts`, revision: 'head', content: 'export const observed = true;\n' });
+  }
+  input.dependencyEdges.push(
+    { from: 'tests/consumerB.ts', to: 'src/action.ts' },
+    { from: 'tests/consumerC.ts', to: 'src/action.ts' },
+    { from: 'tests/consumerD.ts', to: 'tests/consumerB.ts' },
+  );
+  input.contextPlan.selections = [...new Set(input.files.map((file): string => file.path))].map((filePath): { path: string; reasons: string[] } => ({
+    path: filePath, reasons: [filePath === 'src/action.ts' ? 'changed' : 'caller'],
+  }));
+  const previous: ReviewLedger = {
+    schemaVersion: 1, repository: input.identity.repository, pullRequest: input.identity.pullRequest,
+    lastHeadSha: null, openFindings: [],
+  };
+  const snapshot = buildReviewBundle(input, policy);
+  const envelope: PartitionedReviewReport = {
+    schemaVersion: 1, kind: 'partitioned-review', manifestDigest: snapshot.partitionManifest!.digest, synthetic: false,
+    reports: snapshot.partitionManifest!.partitions.map((partition) => ({
+      partitionId: partition.id,
+      report: makeReport(projectPartition(snapshot, partition)),
+    })),
+  };
+  const transitive = snapshot.partitionManifest!.partitions.find((partition): boolean => partition.sourceKeys.includes('head:tests/consumerD.ts'))!;
+  const decision = evaluateReview(snapshot, envelope, previous, policy);
+  assert.equal(decision.status, 'incomplete');
+  assert.ok(
+    decision.reasons.some((reason): boolean => reason.includes('context root') && reason.includes('tests/consumerD.ts')),
+    decision.reasons.join('\n'),
+  );
+  const covered = structuredClone(envelope);
+  for (const entry of covered.reports.find((row): boolean => row.partitionId === transitive.id)!.report.coverage) {
+    entry.relatedPaths = [...entry.relatedPaths, 'tests/consumerD.ts'];
+  }
+  assert.equal(evaluateReview(snapshot, covered, previous, policy).status, 'pass');
+});
+
+test('synthetic review output is refused at the recording boundary', (): void => {
+  const { snapshot, envelope, previous, policy } = fixture();
+  const root = mkdtempSync(path.join(tmpdir(), 'srs-synthetic-'));
+  const synthetic = { ...envelope, synthetic: true };
+  assert.throws(() => recordReview(root, snapshot, synthetic, policy), /synthetic/);
+  const store = prStore(root, snapshot.identity.repository, snapshot.identity.pullRequest);
+  assert.equal(readLedger(store).lastHeadSha, null, 'synthetic output must not advance operational state');
+  assert.equal(evaluateReview(snapshot, envelope, previous, policy).status, 'pass');
 });
 
 test('dependency closure and the unique parent byte cap remain mandatory after rehashing', (): void => {
@@ -259,6 +330,7 @@ test('even a one-part bundle requires its matching wrapped report', (): void => 
   const report = makeReport(projectPartition(bundle, partition));
   const envelope: PartitionedReviewReport = {
     schemaVersion: 1, kind: 'partitioned-review', manifestDigest: bundle.partitionManifest!.digest,
+    synthetic: false,
     reports: [{ partitionId: partition.id, report }],
   };
   assert.equal(evaluateReview(bundle, report, previous, wider).status, 'incomplete');
@@ -282,6 +354,7 @@ test('partial persisted bundles cannot clear a previous blocker or advance the r
   envelope.manifestDigest = snapshot.partitionManifest!.digest;
   for (const row of envelope.reports) {
     row.report.identity = structuredClone(snapshot.identity);
+    row.report.partitionScope = { manifestDigest: snapshot.partitionManifest!.digest, partitionId: row.partitionId };
     row.report.findings = [];
     row.report.reconciliations = [{
       findingId: 'F-setup', outcome: 'withdrawn', rationale: 'Synthetic accepted challenge.', evidence: [actionEvidence()],
@@ -298,7 +371,10 @@ test('partial persisted bundles cannot clear a previous blocker or advance the r
   snapshot.identity.runId = 'complete';
   rebind(snapshot);
   envelope.manifestDigest = snapshot.partitionManifest!.digest;
-  for (const row of envelope.reports) row.report.identity = structuredClone(snapshot.identity);
+  for (const row of envelope.reports) {
+    row.report.identity = structuredClone(snapshot.identity);
+    row.report.partitionScope = { manifestDigest: snapshot.partitionManifest!.digest, partitionId: row.partitionId };
+  }
   assert.equal(recordReview(root, snapshot, envelope, policy).decision.status, 'pass');
   assert.equal(readLedger(store).lastHeadSha, snapshot.identity.headSha);
   assert.deepEqual(readLedger(store).openFindings, []);

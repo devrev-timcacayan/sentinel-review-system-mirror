@@ -11,6 +11,7 @@ export interface ContextPlannerInput {
   revisions: readonly ContextRevision[];
   changes: readonly Change[];
   additionalContextPaths: readonly string[];
+  policyContextPaths?: readonly string[];
 }
 
 export interface ContextPlannerResult {
@@ -778,7 +779,7 @@ export function planReviewContext(input: ContextPlannerInput): ContextPlannerRes
     }
   }
 
-  const selected = new Set<string>([...seedPaths, ...input.additionalContextPaths]);
+  const selected = new Set<string>([...seedPaths, ...input.additionalContextPaths, ...(input.policyContextPaths ?? [])]);
   const reasons = new Map<string, Set<string>>();
   const fallbacks = new Map<string, Set<string>>();
   const addReason = (path: string, reason: string): void => {
@@ -789,6 +790,7 @@ export function planReviewContext(input: ContextPlannerInput): ContextPlannerRes
   };
   for (const [path, reason] of seedReasons) addReason(path, reason);
   for (const path of input.additionalContextPaths) addReason(path, 'prior-finding-context');
+  for (const path of input.policyContextPaths ?? []) addReason(path, 'policy-context');
 
   for (const revision of input.revisions) {
     const analysis = analyzeRevision(revision, seedPaths, seedReasons);
