@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "scope": "Local dependency-closed source bundles and synthetic structural gate probes, not model review.",
+  "policyDigest": "e8371f4dca287a4606f67dfba518574e535d86e4203eeb976b5dcbbf3d216691",
+  "evidence": ".artifacts/partition-replay-e8371f4dca287a46/results.json",
+  "previousMeasurement": "evaluations/context-planner-results.json",
+  "verification": {
+    "fullSuite": {
+      "passed": 137,
+      "total": 137,
+      "log": ".artifacts/verify/final-partition-tests.log"
+    },
+    "afterTestIsolationCleanup": {
+      "passed": 12,
+      "total": 12,
+      "log": ".artifacts/verify/partition-isolation-tests.log",
+      "runtimeChangedAfterFullSuite": false
+    },
+    "typecheckPassed": true,
+    "typecheckLog": ".artifacts/verify/partition-isolation-typecheck.log"
+  },
+  "budgets": {
+    "maxSourceEntriesPerModelPacket": 200,
+    "maxUniqueParentSourceBytes": 4000000,
+    "warnChangedLines": 800,
+    "blockChangedLines": 1500
+  },
+  "cases": [
+    {
+      "id": "pr-508-final",
+      "status": "source-bundle-prepared",
+      "changedLines": 2,
+      "uniqueSourceEntries": 285,
+      "uniqueSourceBytes": 3014721,
+      "totalPartitionSourceBytes": 5288915,
+      "partitionSourceEntries": [200, 200, 94],
+      "allUniqueSourcesMatchGit": true,
+      "syntheticAllPartsGate": "pass",
+      "syntheticMissingPartGate": "incomplete"
+    },
+    {
+      "id": "pr-513-before-fix",
+      "status": "source-bundle-prepared",
+      "changedLines": 1397,
+      "uniqueSourceEntries": 354,
+      "uniqueSourceBytes": 3332476,
+      "totalPartitionSourceBytes": 6925029,
+      "partitionSourceEntries": [200, 200, 200, 145],
+      "allUniqueSourcesMatchGit": true,
+      "syntheticAllPartsGate": "pass",
+      "syntheticMissingPartGate": "incomplete"
+    },
+    {
+      "id": "pr-513-after-fix",
+      "status": "source-bundle-prepared",
+      "changedLines": 1485,
+      "uniqueSourceEntries": 354,
+      "uniqueSourceBytes": 3335291,
+      "totalPartitionSourceBytes": 6936289,
+      "partitionSourceEntries": [200, 200, 200, 145],
+      "allUniqueSourcesMatchGit": true,
+      "syntheticAllPartsGate": "pass",
+      "syntheticMissingPartGate": "incomplete"
+    },
+    {
+      "id": "pr-519-large-low-feedback",
+      "status": "size-refused",
+      "changedLines": 9512
+    },
+    {
+      "id": "pr-493-large-stress",
+      "status": "size-refused",
+      "changedLines": 6017
+    },
+    {
+      "id": "pr-405-initial",
+      "status": "revision-unavailable",
+      "revisionSubstituted": false
+    }
+  ],
+  "interpretation": {
+    "sourceEntries": "A source entry is one path and revision, not necessarily one unique file path.",
+    "coverage": "All captured parent source entries are assigned to at least one dependency-closed partition. Changed before/after sources, trusted base policy context, prior-finding context, and their forward dependencies are shared.",
+    "gate": "Synthetic complete reports exercise the deterministic aggregation contract only. A synthetic pass is neither model output, semantic review, nor PR approval.",
+    "cost": "Shared context repeats across packets. Unique source bytes stay within the unchanged parent cap, while cumulative packet bytes are larger. No model token, latency, or cost measurement was performed.",
+    "limitations": "Static import planning is not complete semantic impact analysis. Runtime-only wiring can still require missing context. Irreducible dependency closures, total-byte overflow, and incomplete reviewer reports remain fail-closed. Actual provider input/token limits remain unverified."
+  },
+  "operations": {
+    "modelExecuted": false,
+    "stateRecordedByHistoricalReplay": false,
+    "githubActionPerformed": false,
+    "previousCapturesRegenerated": false
+  }
+}

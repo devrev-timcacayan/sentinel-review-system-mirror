@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "scope": "Historical collector replay only, not model review or merge approval. Captured before the document-aligned size preflight; PRs over 1,500 cumulative changed lines are now refused before packet preparation.",
+  "sourceRepository": "devrev/sentinel",
+  "executionRepository": "devrev-timcacayan/sentinel-mirror",
+  "validation": "Every captured source entry was compared byte-for-byte with the Git object at its recorded head or merge-base revision. Head, base, merge base, policy digest, run ID, and PR identity were checked.",
+  "evidence": ".artifacts/historical-packet-checks.json",
+  "allCases": {
+    "modelExecutedOnWholePacket": false,
+    "noExpectedLabelsOrReviewerHistoryInRequest": true,
+    "prepareExitZeroMeansApproval": false
+  },
+  "cases": [
+    {
+      "id": "pr-508-final",
+      "changedPaths": 1,
+      "sourceEntries": 200,
+      "dependencyEdges": 775,
+      "snapshotComplete": false,
+      "reason": "Context budget exhausted; 85 selected source entries omitted."
+    },
+    {
+      "id": "pr-513-before-fix",
+      "changedPaths": 11,
+      "sourceEntries": 200,
+      "dependencyEdges": 993,
+      "snapshotComplete": false,
+      "reason": "Context budget exhausted; 154 selected source entries omitted."
+    },
+    {
+      "id": "pr-513-after-fix",
+      "changedPaths": 11,
+      "sourceEntries": 200,
+      "dependencyEdges": 993,
+      "snapshotComplete": false,
+      "reason": "Context budget exhausted; 154 selected source entries omitted."
+    },
+    {
+      "id": "pr-519-large-low-feedback",
+      "changedPaths": 28,
+      "sourceEntries": 148,
+      "dependencyEdges": 696,
+      "snapshotComplete": true,
+      "reason": "Collector reported no known source limitations. This is not a completed semantic review."
+    },
+    {
+      "id": "pr-493-large-stress",
+      "changedPaths": 50,
+      "sourceEntries": 200,
+      "dependencyEdges": 922,
+      "snapshotComplete": false,
+      "reason": "Binary asset unsupported and context budget exhausted; 140 selected source entries omitted."
+    },
+    {
+      "id": "pr-405-initial",
+      "status": "not-prepared",
+      "reason": "Selected head is not in the local object store. No different revision was substituted."
+    }
+  ],
+  "conclusion": "The file-level import graph expands broadly through shared fixtures, even for a one-file change. A bounded, symbol-aware context plan or partitioned review with a completion barrier is needed before mandatory use. Raising limits or dropping callers without evaluation is not established as safe."
+}

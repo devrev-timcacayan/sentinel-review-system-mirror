@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "scope": "First-stage context planner and local collector replay, not model review.",
+  "strategy": "symbol-aware-reverse-v1",
+  "policyDigest": "b5f79f096e2dcbb272a83e737871529c263485d829776c751aa83c3c0478df9d",
+  "evidence": ".artifacts/context-replay-b5f79f096e2dcbb2/results.json",
+  "verification": {
+    "tests": 110,
+    "passed": 110,
+    "testLog": ".artifacts/verify/final-context-tests.log",
+    "typecheckPassed": true,
+    "typecheckLog": ".artifacts/verify/final-context-typecheck.log",
+    "allPreparedSourcesMatchedRecordedGitObjects": true,
+    "modelExecuted": false,
+    "historicalBaselinesRegenerated": false,
+    "limitsRaised": false
+  },
+  "cases": [
+    {
+      "id": "pr-508-final",
+      "status": "prepared-incomplete",
+      "changedLines": 2,
+      "sourceEntriesBefore": 200,
+      "sourceEntriesAfter": 200,
+      "omittedSourceEntriesBefore": 85,
+      "omittedSourceEntriesAfter": 85
+    },
+    {
+      "id": "pr-513-before-fix",
+      "status": "prepared-incomplete",
+      "changedLines": 1397,
+      "sourceEntriesBefore": 200,
+      "sourceEntriesAfter": 200,
+      "omittedSourceEntriesBefore": 154,
+      "omittedSourceEntriesAfter": 154
+    },
+    {
+      "id": "pr-513-after-fix",
+      "status": "prepared-incomplete",
+      "changedLines": 1485,
+      "sourceEntriesBefore": 200,
+      "sourceEntriesAfter": 200,
+      "omittedSourceEntriesBefore": 154,
+      "omittedSourceEntriesAfter": 154
+    },
+    {
+      "id": "pr-519-large-low-feedback",
+      "status": "size-refused",
+      "changedLines": 9512
+    },
+    {
+      "id": "pr-493-large-stress",
+      "status": "size-refused",
+      "changedLines": 6017
+    },
+    {
+      "id": "pr-405-initial",
+      "status": "revision-unavailable",
+      "revisionSubstituted": false
+    }
+  ],
+  "conclusion": "Supported declaration and export routing avoids unrelated callers in controlled fixtures. Real historical fixture wiring and import-time effects still require broad fallbacks and full forward dependencies. No historical context-volume improvement or completed whole-PR review is demonstrated.",
+  "remaining": "Bounded review partitions with cross-part impact context and an all-parts-complete validation barrier are required before this corpus can proceed to complete model review. Increasing limits or accepting partial coverage is not the fix demonstrated here."
+}

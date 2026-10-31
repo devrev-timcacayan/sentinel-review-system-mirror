@@ -1,0 +1,111 @@
+{
+  "schemaVersion": 1,
+  "scope": "Local exploratory evidence, not a calibrated benchmark or a production approval.",
+  "sourceRepository": "devrev/sentinel",
+  "integrationRepository": "devrev-timcacayan/sentinel-mirror",
+  "productionModified": false,
+  "modelExecution": {
+    "requestedModel": "claude-sonnet-5-5",
+    "reportedPrimaryModel": "claude-sonnet-5-5",
+    "provider": "Local firstParty apiKeyHelper, not the production Bedrock service account.",
+    "warning": "[claude-code:unrecognized_model]",
+    "limitations": [
+      "The CLI warning prevents treating the model name alone as verified production-model parity.",
+      "The usage envelope also contains an auxiliary Haiku entry.",
+      "Two files per probe were supplied, not a cumulative PR packet.",
+      "Historical reviewer comments and evaluation labels were withheld from probe requests.",
+      "No full-PR model result, precision, recall, or production cost claim is established."
+    ]
+  },
+  "cases": [
+    {
+      "id": "pr-513-before-fix",
+      "headSha": "6140cceff576b853bc59a4344c1401c60a60eb20",
+      "execution": "bounded-model-probe-completed",
+      "sourceJudgment": "The helper removes duplicate article IDs before a test checks for duplicate IDs. The duplicate assertion therefore cannot detect repeated IDs in the helper input.",
+      "verifiedEvidence": [
+        {
+          "path": "src/pages/customer-portal/knowledgeBaseArticlesSettings.page.ts",
+          "startLine": 462,
+          "endLine": 466
+        },
+        {
+          "path": "tests/platform/knowledge-base/articlePagination.test.ts",
+          "startLine": 66,
+          "endLine": 70
+        }
+      ],
+      "modelJudgment": "Detected this mechanism as an SR-001 blocker.",
+      "contractJudgment": "Neither reported evidence range matched its quoted source at those lines. This diagnostic is not gate-ready and was not accepted as a complete PR review.",
+      "rawArtifacts": ".artifacts/semantic-probes/pr-513-before-fix/"
+    },
+    {
+      "id": "pr-513-after-fix",
+      "headSha": "eb89145e19a54e3d83f283f3e3528d1c0d0aefa7",
+      "execution": "bounded-model-probe-completed",
+      "sourceJudgment": "The same helper now preserves repeated IDs. The duplicate assertion remains in the unchanged test.",
+      "verifiedEvidence": [
+        {
+          "path": "src/pages/customer-portal/knowledgeBaseArticlesSettings.page.ts",
+          "startLine": 482,
+          "endLine": 487
+        },
+        {
+          "path": "tests/platform/knowledge-base/articlePagination.test.ts",
+          "startLine": 66,
+          "endLine": 70
+        }
+      ],
+      "modelJudgment": "Did not re-raise the fixed duplicate-ID mechanism. Returned three advisory findings and one question; those are not adjudicated as confirmed defects here.",
+      "contractJudgment": "All reported evidence ranges failed exact quote-at-lines validation. Absence of a blocker in this bounded diagnostic does not certify the PR.",
+      "rawArtifacts": ".artifacts/semantic-probes/pr-513-after-fix/"
+    },
+    {
+      "id": "pr-519-large-low-feedback",
+      "headSha": "31e66e17309a70c86207a13cc60aff5f51e94577",
+      "baseSha": "e00525107e906b36d4f62b5f2facbb5214c0c35e",
+      "mergeBaseSha": "e00525107e906b36d4f62b5f2facbb5214c0c35e",
+      "execution": "local-source-inspection-only",
+      "gitDiff": {
+        "changedFiles": 28,
+        "insertions": 4895,
+        "deletions": 4617,
+        "binaryPaths": []
+      },
+      "reviewHistory": "Captured history has two human approvals with minimal summary text. That alone does not prove how much review occurred.",
+      "sourceJudgment": "Whitespace-insensitive inspection shows annotation additions and wrapping changes. This is an overblocking control candidate, not an independently certified clean PR.",
+      "modelJudgment": "No new model run for this PR.",
+      "rawArtifacts": ".artifacts/pr-519-whitespace-insensitive.diff"
+    },
+    {
+      "id": "pr-493-large-stress",
+      "headSha": "fa1e01cbe4f4723b1e19f0efa2fa465f092eb0de",
+      "baseSha": "41abb778e042e11c84fd001e827d6657fc038a3f",
+      "mergeBaseSha": "41abb778e042e11c84fd001e827d6657fc038a3f",
+      "execution": "local-source-inspection-only",
+      "gitDiff": {
+        "changedFiles": 50,
+        "insertions": 5996,
+        "deletions": 21,
+        "binaryPaths": ["test-data/platform/devRevlogo.jpg"]
+      },
+      "sourceJudgment": "Coverage stress case with a binary asset. The text-only POC must disclose unsupported content rather than silently count it as reviewed.",
+      "modelJudgment": "No new model run for this PR. Captured historical discussion exists, so this is not a no-feedback example."
+    },
+    {
+      "id": "pr-508-final",
+      "headSha": "fa181370377e4081ce669f6f21395520efb7ddd5",
+      "baseSha": "31af9084a5741ea20970d18c5a97880c884182b7",
+      "mergeBaseSha": "9f6940144d2128ad0e302d70d28babe92b64b40d",
+      "execution": "local-source-inspection-only",
+      "sourceJudgment": "Cumulative diff adds an Escape and an empty-input assertion before the existing Escape. Base SHA differs from merge base, demonstrating why they must be recorded separately.",
+      "modelJudgment": "No new model run. The historical WARN/CLEAN mismatch is a severity-calibration candidate; the runtime failure mechanism is not reproduced here."
+    },
+    {
+      "id": "pr-405-initial",
+      "headSha": "e814666a9db8076c860aa7d2d55bc52b02636540",
+      "execution": "blocked",
+      "reason": "The selected head object is absent from the local historical-source object store after restart. No replacement revision, fresh source proof, or model result is claimed."
+    }
+  ]
+}
