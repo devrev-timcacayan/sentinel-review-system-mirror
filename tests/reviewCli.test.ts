@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -11,9 +11,14 @@ import { ALLOWED_REPOSITORY, SYSTEM_ROOT, loadTestPolicy, makeReport } from './h
 import type { ReviewLedger, ReviewSnapshot } from '../src/contracts.ts';
 
 const CLI = path.resolve(fileURLToPath(new URL('../src/reviewCli.ts', import.meta.url)));
+const RECORD_CLI = path.resolve(fileURLToPath(new URL('../src/cli.ts', import.meta.url)));
 
 function cli(args: string[]): { status: number | null; stdout: string; stderr: string } {
   return spawnSync(process.execPath, ['--experimental-strip-types', CLI, ...args], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+}
+
+function recordCli(args: string[]): { status: number | null; stdout: string; stderr: string } {
+  return spawnSync(process.execPath, ['--experimental-strip-types', RECORD_CLI, ...args], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
 }
 
 function fixture(): { bundleDir: string; snapshot: ReviewSnapshot; ledger: ReviewLedger } {
@@ -80,6 +85,32 @@ test('mock end-to-end run writes synthetic artifacts and exits 0 on a clean gate
   assert.equal(existsSync(path.join(out, 'report.json')), false);
   const execution = JSON.parse(readFileSync(path.join(out, 'execution.json'), 'utf8'));
   assert.equal(execution.synthetic, true);
+});
+
+test('mock review output cannot be recorded into operational state', (): void => {
+  const { bundleDir, snapshot } = fixture();
+  const outputDir = path.join(mkdtempSync(path.join(tmpdir(), 'srs-mock-record-out-')), 'out');
+  const stateRoot = path.join(mkdtempSync(path.join(tmpdir(), 'srs-mock-record-state-')), 'state');
+  const review = cli(['--bundle', bundleDir, '--out', outputDir, '--provider', 'mock', '--responses', responsesFile(snapshot), '--system-root', SYSTEM_ROOT]);
+  assert.equal(review.status, 0, review.stderr + review.stdout);
+  const reviewSummary = JSON.parse(review.stdout);
+  assert.equal(reviewSummary.synthetic, true);
+  const mockReportPath = path.join(outputDir, 'mock-report.json');
+  assert.ok(existsSync(mockReportPath));
+  assert.equal(JSON.parse(readFileSync(mockReportPath, 'utf8')).synthetic, true);
+
+  const record = recordCli([
+    'record', '--snapshot', path.join(outputDir, 'snapshot.json'), '--report', mockReportPath,
+    '--state-root', stateRoot, '--system-root', SYSTEM_ROOT,
+  ]);
+  assert.equal(record.status, 1, record.stderr + record.stdout);
+  assert.match(record.stderr, /Refusing to record synthetic review output/);
+
+  const storePath = path.join(stateRoot, 'repos', ...ALLOWED_REPOSITORY.split('/'), 'prs', String(snapshot.identity.pullRequest));
+  assert.equal(existsSync(path.join(storePath, 'journal.jsonl')), false);
+  assert.equal(existsSync(path.join(storePath, 'ledger.json')), false);
+  const runsPath = path.join(storePath, 'runs');
+  assert.deepEqual(existsSync(runsPath) ? readdirSync(runsPath) : [], []);
 });
 
 test('flag validation refuses before any provider call', (): void => {

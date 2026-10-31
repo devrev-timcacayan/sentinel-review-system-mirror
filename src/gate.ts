@@ -64,7 +64,7 @@ function isEvidence(value: unknown): value is Evidence {
     && isText(value.quote);
 }
 
-function isFinding(value: unknown): value is Finding {
+export function isFinding(value: unknown): value is Finding {
   return isObject(value)
     && hasKeys(value, ['id', 'ruleId', 'severity', 'title', 'explanation', 'impact', 'introducedBy', 'evidence', 'counterEvidence'])
     && typeof value.id === 'string' && ID_PATTERN.test(value.id)

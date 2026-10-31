@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 import type { Finding, ReviewReport } from '../src/contracts.ts';
-import { acquirePrLock, migrateLegacyJournal, prStore, readLedger, recordReview, withPrLock } from '../src/state.ts';
+import { acquirePrLock, migrateLegacyJournal, prStore, readLedger, recordReview, StateCorruptionError, withPrLock } from '../src/state.ts';
 import { loadTestPolicy, makeReport, makeSnapshotFixture, ALLOWED_REPOSITORY } from './helpers.ts';
 
 const FIRST_SHA = 'a'.repeat(40);
@@ -221,6 +221,130 @@ test('a corrupt only-ledger fails closed instead of returning an empty ledger', 
   assert.throws(() => readLedger(store), /manual recovery|unusable ledger cache/);
 });
 
+test('persisted findings require their complete evidence shape before ledger consumers use them', (): void => {
+  const root = stateRoot();
+  const loaded = loadTestPolicy();
+  const snapshot = makeSnapshotFixture(loaded);
+  recordReview(root, snapshot, reportWithBlocker(snapshot), loaded.policy);
+  const store = prStore(root, ALLOWED_REPOSITORY, 17);
+  const runPath = path.join(store.runsDir, 'run-1.json');
+  const original = JSON.parse(readFileSync(runPath, 'utf8'));
+  const malformedFindings: Array<[string, (finding: Record<string, unknown>) => void]> = [
+    ['introducedBy', (finding) => { delete finding.introducedBy; }],
+    ['ruleId', (finding) => { delete finding.ruleId; }],
+    ['evidence array', (finding) => { finding.evidence = []; }],
+    ['counterEvidence', (finding) => { delete finding.counterEvidence; }],
+    ['coordinates', (finding) => { (finding.introducedBy as Record<string, unknown>).startLine = 0; }],
+    ['path', (finding) => { (finding.introducedBy as Record<string, unknown>).path = '../outside.ts'; }],
+  ];
+
+  unlinkSync(store.journalPath);
+  for (const [field, corrupt] of malformedFindings) {
+    const record = structuredClone(original);
+    corrupt(record.decision.ledger.openFindings[0]);
+    writeFileSync(runPath, JSON.stringify(record));
+    assert.throws(
+      () => readLedger(store),
+      (error: unknown) => error instanceof StateCorruptionError
+        && /manual recovery/.test(error.message)
+        && error.message.includes(runPath),
+      `malformed ${field} must identify the authoritative origin`,
+    );
+  }
+});
+
+test('duplicate persisted finding IDs require recovery', (): void => {
+  const root = stateRoot();
+  const loaded = loadTestPolicy();
+  const snapshot = makeSnapshotFixture(loaded);
+  recordReview(root, snapshot, reportWithBlocker(snapshot), loaded.policy);
+  const store = prStore(root, ALLOWED_REPOSITORY, 17);
+  const runPath = path.join(store.runsDir, 'run-1.json');
+  const record = JSON.parse(readFileSync(runPath, 'utf8'));
+  record.decision.ledger.openFindings.push(structuredClone(record.decision.ledger.openFindings[0]));
+  writeFileSync(runPath, JSON.stringify(record));
+  unlinkSync(store.journalPath);
+
+  assert.throws(() => readLedger(store), (error: unknown) => error instanceof StateCorruptionError
+    && /duplicate finding ID/.test(error.message)
+    && error.message.includes(runPath));
+});
+
+test('recording completes short filesystem writes without truncating UTF-8 state', (): void => {
+  const root = stateRoot();
+  const moduleUrl = pathToFileURL(fileURLToPath(new URL('../src/state.ts', import.meta.url))).href;
+  const helpersUrl = pathToFileURL(fileURLToPath(new URL('./helpers.ts', import.meta.url))).href;
+  const child = spawnSync(process.execPath, [
+    '--experimental-strip-types',
+    '--input-type=module',
+    '-e',
+    `import fs from 'node:fs';
+     import { syncBuiltinESMExports } from 'node:module';
+     import { recordReview, prStore, readLedger } from ${JSON.stringify(moduleUrl)};
+     import { loadTestPolicy, makeReport, makeSnapshotFixture, ALLOWED_REPOSITORY } from ${JSON.stringify(helpersUrl)};
+     const originalWriteSync = fs.writeSync.bind(fs);
+     fs.writeSync = (fd, data, ...args) => {
+       if (typeof data === 'string') {
+         const [position, encoding] = args;
+         return originalWriteSync(fd, data.slice(0, 5), position, encoding);
+       }
+       const offset = args[0] ?? 0;
+       const length = args[1] ?? data.length - offset;
+       return originalWriteSync(fd, data, offset, Math.min(length, 5), args[2]);
+     };
+     syncBuiltinESMExports();
+     const loaded = loadTestPolicy();
+     const snapshot = makeSnapshotFixture(loaded);
+     const report = makeReport(snapshot, { findings: [
+       { id: 'F-utf8', ruleId: 'SR-002', severity: 'blocker', title: 'Unicode evidence 🚀',
+         explanation: 'Unicode finding explanation.', impact: 'Unicode impact.',
+         introducedBy: { path: 'src/action.ts', revision: 'head', startLine: 1, endLine: 1, quote: 'export const required = false;' },
+         evidence: [{ path: 'src/action.ts', revision: 'head', startLine: 1, endLine: 1, quote: 'export const required = false;' }],
+         counterEvidence: ['Unicode counter-evidence ✓'] },
+     ] });
+     recordReview(${JSON.stringify(root)}, snapshot, report, loaded.policy);
+     const ledger = readLedger(prStore(${JSON.stringify(root)}, ALLOWED_REPOSITORY, 17));
+     if (ledger.openFindings[0]?.title !== 'Unicode evidence 🚀') process.exit(19);`,
+  ], { encoding: 'utf8', timeout: 10_000 });
+  assert.equal(child.status, 0, `short-write child failed: ${child.stdout} ${child.stderr}`);
+  const store = prStore(root, ALLOWED_REPOSITORY, 17);
+  const record = JSON.parse(readFileSync(path.join(store.runsDir, 'run-1.json'), 'utf8'));
+  assert.equal(record.report.findings[0].title, 'Unicode evidence 🚀');
+  assert.equal(readLedger(store).openFindings[0]?.counterEvidence[0], 'Unicode counter-evidence ✓');
+});
+
+test('zero-progress filesystem writes fail promptly at the public record boundary', (): void => {
+  const root = stateRoot();
+  const moduleUrl = pathToFileURL(fileURLToPath(new URL('../src/state.ts', import.meta.url))).href;
+  const helpersUrl = pathToFileURL(fileURLToPath(new URL('./helpers.ts', import.meta.url))).href;
+  const child = spawnSync(process.execPath, [
+    '--experimental-strip-types',
+    '--input-type=module',
+    '-e',
+    `import fs from 'node:fs';
+     import { syncBuiltinESMExports } from 'node:module';
+     import { recordReview, prStore, readLedger } from ${JSON.stringify(moduleUrl)};
+     import { loadTestPolicy, makeReport, makeSnapshotFixture, ALLOWED_REPOSITORY } from ${JSON.stringify(helpersUrl)};
+     const originalOpenSync = fs.openSync.bind(fs);
+     const originalWriteSync = fs.writeSync.bind(fs);
+     const targets = new Set();
+     fs.openSync = (filePath, flags, ...args) => {
+       const fd = originalOpenSync(filePath, flags, ...args);
+       if (String(filePath).endsWith('/journal.jsonl')) targets.add(fd);
+       return fd;
+     };
+     fs.writeSync = (fd, ...args) => targets.has(fd) ? 0 : originalWriteSync(fd, ...args);
+     syncBuiltinESMExports();
+     const loaded = loadTestPolicy();
+     const snapshot = makeSnapshotFixture(loaded);
+     try { recordReview(${JSON.stringify(root)}, snapshot, makeReport(snapshot), loaded.policy); process.exit(21); }
+     catch (error) { if (!/File write made no progress/.test(error.message)) throw error; }
+     try { readLedger(prStore(${JSON.stringify(root)}, ALLOWED_REPOSITORY, 17)); process.exit(22); }
+     catch (error) { if (!/manual recovery/.test(error.message)) throw error; }`,
+  ], { encoding: 'utf8', timeout: 10_000 });
+  assert.equal(child.status, 0, `zero-write child failed: ${child.stdout} ${child.stderr}`);
+});
+
 test('a corrupt run record fails closed instead of being skipped', (): void => {
   const root = stateRoot();
   const loaded = loadTestPolicy();
@@ -413,6 +537,41 @@ test('legacy journals upgrade through explicit migration preserving history', ()
   const swapped = readFileSync(store.journalPath, 'utf8').split('\n').filter((line) => line.trim().length > 0);
   writeFileSync(store.journalPath, `${swapped[1]}\n${swapped[0]}\n`);
   assert.throws(() => readLedger(store), /monotonic|sequence|manual recovery/);
+});
+
+test('legacy migration refuses resolved finding history without altering the journal', (): void => {
+  const root = stateRoot();
+  const loaded = loadTestPolicy();
+  const first = makeSnapshotFixture(loaded);
+  recordReview(root, first, reportWithBlocker(first), loaded.policy);
+  const second = makeSnapshotFixture(loaded, { headSha: NEXT_SHA, previousHeadSha: FIRST_SHA, runId: 'run-2' });
+  const fixedSource = second.files.find((file) => file.path === 'src/action.ts' && file.revision === 'head');
+  assert.ok(fixedSource);
+  fixedSource.content = 'export const required = true;\n';
+  second.changes = [];
+  second.cumulativeDiff = '';
+  second.size.changedLines = 0;
+  const evidence = { path: 'src/action.ts', revision: 'head' as const, startLine: 1, endLine: 1, quote: 'export const required = true;' };
+  const resolution = makeReport(second, { reconciliations: [
+    { findingId: 'F-setup', outcome: 'fixed', rationale: 'The unsafe setup path was corrected.', evidence: [evidence] },
+  ] });
+  const outcome = recordReview(root, second, resolution, loaded.policy);
+  assert.equal(outcome.decision.status, 'pass');
+  assert.equal(outcome.decision.ledger.openFindings.length, 0);
+
+  const store = prStore(root, ALLOWED_REPOSITORY, 17);
+  const legacy = readFileSync(store.journalPath, 'utf8').split('\n').filter((line) => line.trim().length > 0).map((line) => {
+    const entry = JSON.parse(line);
+    delete entry.seq;
+    delete entry.previousLedger;
+    return JSON.stringify(entry);
+  }).join('\n') + '\n';
+  writeFileSync(store.journalPath, legacy);
+  const original = readFileSync(store.journalPath);
+
+  assert.throws(() => migrateLegacyJournal(store), /no transition compatible|manual recovery/);
+  assert.deepEqual(readFileSync(store.journalPath), original);
+  assert.equal(readdirSync(store.dir).some((name) => name.endsWith('.legacy.bak')), false);
 });
 
 test('legacy migration keeps an incomplete transition and its prior blocker intact', (): void => {

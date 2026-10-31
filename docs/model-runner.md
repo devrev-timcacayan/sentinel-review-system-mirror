@@ -50,7 +50,10 @@ parent plus the assembled envelope remains the sole final gate.
 5. The assembled `PartitionedReviewReport` envelope is always evaluated by
    `evaluateReview`. Missing parts stay missing; no synthesized pass is ever
    emitted. The envelope carries `synthetic`; mock output writes
-   `synthetic: true` and `record` refuses to persist it as operational state.
+   `synthetic: true` and `record` refuses to persist an envelope carrying that
+   marker as operational state. The marker prevents accidental recording of
+   unmodified mock output; it is not authenticated provenance and cannot prevent
+   deliberate relabeling as `synthetic: false`.
 
 ## Accounting scope
 

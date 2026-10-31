@@ -1,14 +1,13 @@
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { evaluateReview } from './gate.ts';
+import { evaluateReview, isFinding } from './gate.ts';
 import type { GateDecision, ReviewLedger, ReviewPolicy, ReviewSnapshot } from './contracts.ts';
 
 const REPOSITORY_KEY_PATTERN = /^([A-Za-z0-9][A-Za-z0-9_.-]*)\/([A-Za-z0-9][A-Za-z0-9_.-]*)$/;
 const RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/;
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const DECISION_STATUSES = new Set(['pass', 'changes_required', 'incomplete']);
-const SEVERITIES = new Set(['blocker', 'advisory', 'question']);
 
 export interface PrStore {
   repository: string;
@@ -88,7 +87,7 @@ export function acquirePrLock(store: PrStore, purpose: string = 'review-run'): P
     throw error;
   }
   try {
-    writeSync(fd, `${JSON.stringify({ pid: process.pid, token, purpose, createdAt: new Date().toISOString() })}\n`);
+    writeBufferCompletely(fd, Buffer.from(`${JSON.stringify({ pid: process.pid, token, purpose, createdAt: new Date().toISOString() })}\n`));
   } finally {
     closeSync(fd);
   }
@@ -137,10 +136,11 @@ function validateLedgerShape(value: unknown, store: PrStore, origin: string): Re
     'lastHeadSha must be null or a 40-char SHA',
   );
   check(Array.isArray(value.openFindings), 'openFindings must be an array');
+  const findingIds = new Set<string>();
   for (const finding of value.openFindings as unknown[]) {
-    check(isObject(finding), 'openFindings entry is not an object');
-    check(typeof finding.id === 'string' && finding.id.trim().length > 0, 'openFindings entry missing id');
-    check(SEVERITIES.has(String(finding.severity)), `openFindings entry has invalid severity ${String(finding.severity)}`);
+    check(isFinding(finding), 'openFindings entry has invalid Finding shape');
+    check(!findingIds.has(finding.id), `openFindings contains duplicate finding ID ${finding.id}`);
+    findingIds.add(finding.id);
   }
   return value as unknown as ReviewLedger;
 }
@@ -459,7 +459,7 @@ export function canonicalJson(value: unknown): string {
 function writeFileExclusive(filePath: string, content: string): void {
   const fd = openSync(filePath, 'wx');
   try {
-    writeSync(fd, content);
+    writeBufferCompletely(fd, Buffer.from(content));
   } finally {
     closeSync(fd);
   }
@@ -477,7 +477,7 @@ function writeBufferCompletely(fd: number, content: Buffer): void {
 function appendFile(filePath: string, content: string): void {
   const fd = openSync(filePath, 'a');
   try {
-    writeSync(fd, content);
+    writeBufferCompletely(fd, Buffer.from(content));
   } finally {
     closeSync(fd);
   }

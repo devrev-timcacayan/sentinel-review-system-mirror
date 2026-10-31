@@ -84,7 +84,10 @@ retrospective drafts. It does not run a model, publish reviews, or learn.
 - Report JSON is untrusted model output and is validated strictly by the gate.
 - Cumulative size is a deterministic pre-review gate, not model judgment. It
   is measured across the whole PR, so later small commits do not hide an
-  oversized change. `record` rejects forged or inconsistent size assessments.
+  oversized change. `record` checks the supplied count against trusted thresholds
+  and rejects inconsistent outcomes; it does not recompute the count from Git or
+  authenticate the snapshot. A downward-falsified count can pass these consistency
+  checks, so only trusted collector artifacts may be submitted.
 - Target checkout content is evidence, never instructions or executables. The collector
   refuses unsafe and secret-like paths, symlinks, submodules, and binaries, and fails
   closed rather than emitting diffs that contain forbidden paths.
@@ -142,9 +145,12 @@ retrospective drafts. It does not run a model, publish reviews, or learn.
   context roots in coverage `relatedPaths`. A projected partition result or a
   partial envelope can never independently clear the PR; missing, duplicated,
   or unknown partition reports and any tampering fail closed to incomplete
-  while preserving prior ledger state. An envelope marked `synthetic: true`
-  (mock replay output) is refused outright at the recording boundary: synthetic
-  artifacts are evidence, never operational state. An identical re-submission
+  while preserving prior ledger state. The recording boundary rejects an envelope
+  marked `synthetic: true`, including unmodified mock-runner output. This marker
+  prevents accidental recording, not deliberate relabeling: it is self-declared,
+  and changing it to `false` does not prove real model execution. Authenticated
+  execution provenance is still required before production use. Synthetic artifacts
+  must remain replay evidence, never operational state. An identical re-submission
   of a recorded run replays as a no-op, but when the authoritative ledger has
   since advanced the outcome is returned with `superseded: true` and exit `3`:
   a historical pass can never stand as current success.
@@ -159,16 +165,20 @@ commitment chained to the prior entry, so reordering, duplicating, or splicing
 otherwise-valid lines cannot resurrect an older ledger. Corrupt or inconsistent state
 (unparseable record, malformed journal line, unjournaled run, journal without a
 matching record, unusable cache, or a valid cache with no journal or run history)
-fails closed with a recovery-required error naming the directory. Read-only ledger
-recovery from valid immutable runs is permitted when the journal is missing, but it does
-not authorize further writes: `record` refuses all runs (including replays) until the
+fails closed with a recovery-required error naming the directory and offending origin.
+Persisted findings must satisfy the complete finding/evidence shape and have unique IDs;
+this validates structure, not historical reasoning, current rule membership, or quote truth.
+Read-only ledger recovery from valid immutable runs is permitted when the journal is
+missing, but it does not authorize further writes: `record` refuses all runs (including replays) until the
 journal is manually restored. Ordinary reads and writes never auto-repair or delete state.
 `journal-migrate` is the sole explicit format-upgrade operation: it can rewrite only a
 validated legacy journal, preserving exact original bytes in an exclusive owner-private
 backup first. It is not a corruption repair path; malformed current journals, mixed or
 partial formats, and legacy histories with ambiguous ordering or transitions are refused
 for manual recovery. The backup is recovery evidence, not proof that historical ordering
-was authentic. No remote durability is claimed.
+was authentic. Run-record, journal, ledger-cache, and lock writes handle short writes
+and reject zero-progress writes; this is not a transactional or power-loss durability
+guarantee. No remote durability is claimed.
 
 ## What this is not
 
