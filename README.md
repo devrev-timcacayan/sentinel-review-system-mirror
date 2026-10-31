@@ -32,8 +32,14 @@ retrospective drafts. It does not run a model, publish reviews, or learn.
   `maxFiles`, preparation exits `3` with limitations and publishes nothing.
   Cumulative changed-line preflight still applies: above 800 lines marks
   `split_recommended`, above 1,500 refuses before partition planning. Shared
-  forward context is repeated in every part, while the unique total source-byte
-  cap is unchanged.
+  forward context is copied into every part payload, while the unique total
+  source-byte cap is unchanged. Reviewers must inspect all supplied impact
+  context, including shared files. This broad inspection obligation is an
+  attestation, not a deterministic check that every supplied source appears in
+  `relatedPaths`: the single-part gate checks available citations and direct
+  dependency-graph neighbors of changed paths; the all-parts gate additionally
+  requires acknowledgment of each non-shared assigned context root. See
+  `.devin/partition.prompt.md` for the complete protocol.
 - `review --bundle DIR --out DIR --provider mock --responses FILE` replays a
   bundle through the deterministic mock provider, always labeled
   `synthetic: true`; `--provider bedrock` additionally needs
@@ -52,6 +58,20 @@ retrospective drafts. It does not run a model, publish reviews, or learn.
 - `retrospective --repository OWNER/REPO --pr N --event FILE --out DIR`
   Assembles a `needs-human-verification` draft from recorded runs for a PR close/merge
   event. `candidates` is always empty; it prepares data only.
+- `journal-migrate --repository OWNER/REPO --pr N [--state-root PATH] [--system-root PATH]`
+  Explicitly upgrades a genuine legacy journal to the current sequenced, chained format.
+  It takes the PR lock and preserves the original journal bytes in an exclusive,
+  owner-private backup before replacing the journal atomically. The command returns the
+  backup location as `backupPath`. A current valid journal is a no-op (`already-current`),
+  returns `backupPath: null`, and does not create a backup. Migration is deliberately
+  conservative: it refuses empty, corrupt, mixed-format, partial, or ambiguous legacy
+  histories, including histories whose ordering cannot be established safely from the
+  available run/ledger transitions. Automatic migration also refuses legacy histories that
+  retire or change the rule/severity of prior findings, even if those resolutions were
+  legitimate; those histories require manual verification under the original policy.
+  It does not authenticate historical ordering or replay old reviews under today's policy. On refusal, do not edit or discard state to force a
+  migration; inspect the reported files and preserve the backup/recovery artifacts, then
+  resolve manually before recording further runs.
 - `--help` prints usage.
 
 ## Trust boundaries
@@ -142,8 +162,13 @@ matching record, unusable cache, or a valid cache with no journal or run history
 fails closed with a recovery-required error naming the directory. Read-only ledger
 recovery from valid immutable runs is permitted when the journal is missing, but it does
 not authorize further writes: `record` refuses all runs (including replays) until the
-journal is manually restored. Repair is a manual, human operation on the files named in
-the error; the tool never auto-repairs or deletes state. No remote durability is claimed.
+journal is manually restored. Ordinary reads and writes never auto-repair or delete state.
+`journal-migrate` is the sole explicit format-upgrade operation: it can rewrite only a
+validated legacy journal, preserving exact original bytes in an exclusive owner-private
+backup first. It is not a corruption repair path; malformed current journals, mixed or
+partial formats, and legacy histories with ambiguous ordering or transitions are refused
+for manual recovery. The backup is recovery evidence, not proof that historical ordering
+was authentic. No remote durability is claimed.
 
 ## What this is not
 

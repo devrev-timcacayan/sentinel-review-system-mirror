@@ -248,13 +248,14 @@ function commandJournalMigrate(args: string[]): number {
   const pullRequest = parsePrNumber(flags.get('pr'));
   const stateRoot = path.resolve(flags.get('state-root') ?? defaultStateRoot(systemRoot));
   const store = prStore(stateRoot, repository, pullRequest);
-  const result = withPrLock(store, (): { migrated: number; alreadyCurrent: boolean } => migrateLegacyJournal(store), 'journal-migrate');
+  const result = migrateLegacyJournal(store);
   console.log(JSON.stringify({
-    status: 'migrated',
+    status: result.status,
     entries: result.migrated,
     alreadyCurrent: result.alreadyCurrent,
     journalPath: store.journalPath,
-    note: 'Existing line order was preserved as authoritative. Inspect the journal before trusting migrated history if tampering is possible.',
+    backupPath: result.backupPath,
+    note: 'Migration validates available immutable snapshot transition evidence but does not authenticate local records or replay historical reports under current policy.',
   }, null, 2));
   return 0;
 }

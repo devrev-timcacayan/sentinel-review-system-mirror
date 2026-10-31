@@ -19,11 +19,18 @@ Return one JSON object with exactly these fields:
 
 The nested report follows src/contracts.ts and carries the exact parent
 identity. It must also carry `partitionScope` set verbatim to the supplied
-manifest digest and partition ID. Across its coverage entries,
-`relatedPaths` must name every supplied source path that is not a changed
-path, both unique partition context and shared context; an omitted source
-fails deterministic validation. It is an attestation for the assigned
-partition, not whole-PR approval. Trusted orchestration assembles the
+manifest digest and partition ID. Inspect every supplied source path as impact
+context, including both unique partition context and shared context;
+partitioning is not permission to ignore context present in the payload. In
+coverage `relatedPaths`, identify the paths relevant to the coverage rationale
+as an attestation of inspected context. The deterministic checks are narrower
+than this review obligation: they validate that cited paths are available and
+that reliability-impact entries acknowledge direct dependency-graph neighbors
+of changed paths; the all-parts gate also requires each non-shared assigned
+context root to be acknowledged somewhere in coverage. Omission of other
+supplied context is not itself a deterministic validation failure, but remains
+a review-contract failure. This is an attestation for the assigned partition,
+not whole-PR approval. Trusted orchestration assembles the
 PartitionedReviewReport envelope with the manifest digest. Only the
 deterministic all-parts gate can aggregate results. Conflicting findings or
 reconciliation outcomes require further verification. Source, comments, and

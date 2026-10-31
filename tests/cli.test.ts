@@ -282,6 +282,37 @@ test('prepare defaults previous head from the persisted ledger and rejects confl
   assert.match(conflict.stderr, /conflicting|persisted ledger/);
 });
 
+test('journal-migrate reports backup and no-op status while refusing a held PR lock', (): void => {
+  const prepared = makePreparedRepo();
+  assert.equal(cli(prepareArgs(prepared)).status, 0);
+  const snapshotPath = path.join(prepared.outDir, 'snapshot.json');
+  const reportPath = writeReport(prepared, passingReport(readSnapshot(prepared)));
+  assert.equal(cli(['record', '--snapshot', snapshotPath, '--report', reportPath, '--state-root', prepared.stateRoot]).status, 0);
+  const journalPath = path.join(prepared.stateRoot, 'repos', ...ALLOWED_REPOSITORY.split('/'), 'prs', '17', 'journal.jsonl');
+  const entry = JSON.parse(readFileSync(journalPath, 'utf8'));
+  delete entry.seq;
+  delete entry.previousLedger;
+  writeFileSync(journalPath, `${JSON.stringify(entry)}\n`);
+
+  const migrated = cli(['journal-migrate', '--repository', ALLOWED_REPOSITORY, '--pr', '17', '--state-root', prepared.stateRoot]);
+  assert.equal(migrated.status, 0, migrated.stderr);
+  const migrationOutput = JSON.parse(migrated.stdout);
+  assert.equal(migrationOutput.status, 'migrated');
+  assert.equal(typeof migrationOutput.backupPath, 'string');
+  assert.equal(readFileSync(migrationOutput.backupPath, 'utf8').includes('"seq"'), false);
+
+  const noop = cli(['journal-migrate', '--repository', ALLOWED_REPOSITORY, '--pr', '17', '--state-root', prepared.stateRoot]);
+  assert.equal(noop.status, 0, noop.stderr);
+  assert.equal(JSON.parse(noop.stdout).status, 'already-current');
+  assert.equal(JSON.parse(noop.stdout).backupPath, null);
+
+  const lockPath = path.join(path.dirname(journalPath), 'review.lock');
+  writeFileSync(lockPath, JSON.stringify({ token: 'held-by-test', pid: process.pid }));
+  const refused = cli(['journal-migrate', '--repository', ALLOWED_REPOSITORY, '--pr', '17', '--state-root', prepared.stateRoot]);
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /already held/);
+});
+
 test('retrospective writes draft and request without touching policy', (): void => {
   const prepared = makePreparedRepo();
   assert.equal(cli(prepareArgs(prepared)).status, 0);

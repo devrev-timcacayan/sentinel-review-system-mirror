@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -304,6 +304,87 @@ test('an intervening incomplete run supersedes an older pass even when the ledge
   assert.equal(replay.superseded, true, 'the newer journaled run supersedes the old pass even without ledger drift');
 });
 
+test('migration refuses a reordered current journal without changing its bytes', (): void => {
+  const root = stateRoot();
+  const loaded = loadTestPolicy();
+  const first = makeSnapshotFixture(loaded);
+  recordReview(root, first, makeReport(first), loaded.policy);
+  const second = makeSnapshotFixture(loaded, { headSha: NEXT_SHA, previousHeadSha: FIRST_SHA, runId: 'run-2' });
+  recordReview(root, second, reportWithBlocker(second), loaded.policy);
+  const store = prStore(root, ALLOWED_REPOSITORY, 17);
+  const lines = readFileSync(store.journalPath, 'utf8').split('\n').filter((line) => line.trim().length > 0);
+  const corrupt = `${lines[1]}\n${lines[0]}\n`;
+  writeFileSync(store.journalPath, corrupt);
+
+  assert.throws(() => migrateLegacyJournal(store), /sequence|previous ledger|manual recovery/);
+  assert.equal(readFileSync(store.journalPath, 'utf8'), corrupt);
+});
+
+test('migration leaves a valid current journal untouched without a backup', (): void => {
+  const root = stateRoot();
+  const loaded = loadTestPolicy();
+  const snapshot = makeSnapshotFixture(loaded);
+  recordReview(root, snapshot, makeReport(snapshot), loaded.policy);
+  const store = prStore(root, ALLOWED_REPOSITORY, 17);
+  const before = readFileSync(store.journalPath);
+  const beforeInode = statSync(store.journalPath).ino;
+  const migration = migrateLegacyJournal(store);
+
+  assert.deepEqual(migration, { migrated: 1, alreadyCurrent: true, status: 'already-current', backupPath: null });
+  assert.deepEqual(readFileSync(store.journalPath), before);
+  assert.equal(statSync(store.journalPath).ino, beforeInode);
+});
+
+test('migration refuses partial sequencing fields and retains original bytes', (): void => {
+  const root = stateRoot();
+  const loaded = loadTestPolicy();
+  const snapshot = makeSnapshotFixture(loaded);
+  recordReview(root, snapshot, makeReport(snapshot), loaded.policy);
+  const store = prStore(root, ALLOWED_REPOSITORY, 17);
+  const entry = JSON.parse(readFileSync(store.journalPath, 'utf8')) as Record<string, unknown>;
+  delete entry.previousLedger;
+  const corrupt = `${JSON.stringify(entry)}\n`;
+  writeFileSync(store.journalPath, corrupt);
+
+  assert.throws(() => migrateLegacyJournal(store), /partial sequencing|manual recovery/);
+  assert.equal(readFileSync(store.journalPath, 'utf8'), corrupt);
+});
+
+test('migration refuses malformed current sequence values without changing journal bytes', (): void => {
+  const root = stateRoot();
+  const loaded = loadTestPolicy();
+  const snapshot = makeSnapshotFixture(loaded);
+  recordReview(root, snapshot, makeReport(snapshot), loaded.policy);
+  const store = prStore(root, ALLOWED_REPOSITORY, 17);
+  const entry = JSON.parse(readFileSync(store.journalPath, 'utf8'));
+  entry.seq = '1';
+  const corrupt = `${JSON.stringify(entry)}\n`;
+  writeFileSync(store.journalPath, corrupt);
+
+  assert.throws(() => migrateLegacyJournal(store), /invalid sequence|manual recovery/);
+  assert.equal(readFileSync(store.journalPath, 'utf8'), corrupt);
+});
+
+test('migration refuses mixed legacy and current journal lines without modifying either', (): void => {
+  const root = stateRoot();
+  const loaded = loadTestPolicy();
+  const first = makeSnapshotFixture(loaded);
+  recordReview(root, first, makeReport(first), loaded.policy);
+  const second = makeSnapshotFixture(loaded, { headSha: NEXT_SHA, previousHeadSha: FIRST_SHA, runId: 'run-2' });
+  recordReview(root, second, makeReport(second), loaded.policy);
+  const store = prStore(root, ALLOWED_REPOSITORY, 17);
+  const lines = readFileSync(store.journalPath, 'utf8').split('\n').filter((line) => line.trim().length > 0);
+  const current = JSON.parse(lines[1]);
+  const legacy = JSON.parse(lines[0]);
+  delete legacy.seq;
+  delete legacy.previousLedger;
+  const mixed = `${JSON.stringify(legacy)}\n${JSON.stringify(current)}\n`;
+  writeFileSync(store.journalPath, mixed);
+
+  assert.throws(() => migrateLegacyJournal(store), /mixes legacy and current|manual recovery/);
+  assert.equal(readFileSync(store.journalPath, 'utf8'), mixed);
+});
+
 test('legacy journals upgrade through explicit migration preserving history', (): void => {
   const root = stateRoot();
   const loaded = loadTestPolicy();
@@ -320,13 +401,42 @@ test('legacy journals upgrade through explicit migration preserving history', ()
     return JSON.stringify(entry);
   }).join('\n') + '\n');
   assert.throws(() => readLedger(store), /sequencing|journal-migrate|manual recovery/);
+  const original = readFileSync(store.journalPath);
   const migrated = migrateLegacyJournal(store);
   assert.equal(migrated.migrated, 2);
   assert.equal(migrated.alreadyCurrent, false);
+  assert.equal(migrated.status, 'migrated');
+  assert.equal(migrated.backupPath === null, false);
   assert.equal(readLedger(store).openFindings.length, 1);
+  assert.equal(readFileSync(migrated.backupPath as string).equals(original), true);
+  assert.equal(statSync(migrated.backupPath as string).mode & 0o777, 0o600);
   const swapped = readFileSync(store.journalPath, 'utf8').split('\n').filter((line) => line.trim().length > 0);
   writeFileSync(store.journalPath, `${swapped[1]}\n${swapped[0]}\n`);
   assert.throws(() => readLedger(store), /monotonic|sequence|manual recovery/);
+});
+
+test('legacy migration keeps an incomplete transition and its prior blocker intact', (): void => {
+  const root = stateRoot();
+  const loaded = loadTestPolicy();
+  const first = makeSnapshotFixture(loaded);
+  recordReview(root, first, reportWithBlocker(first), loaded.policy);
+  const second = makeSnapshotFixture(loaded, { headSha: NEXT_SHA, previousHeadSha: FIRST_SHA, runId: 'run-2' });
+  const incomplete = recordReview(root, second, { verdict: 'malformed' }, loaded.policy);
+  assert.equal(incomplete.decision.status, 'incomplete');
+  assert.equal(incomplete.decision.ledger.openFindings[0]?.id, 'F-setup');
+
+  const store = prStore(root, ALLOWED_REPOSITORY, 17);
+  const lines = readFileSync(store.journalPath, 'utf8').split('\n').filter((line) => line.trim().length > 0);
+  writeFileSync(store.journalPath, lines.map((line) => {
+    const entry = JSON.parse(line);
+    delete entry.seq;
+    delete entry.previousLedger;
+    return JSON.stringify(entry);
+  }).join('\n') + '\n');
+  const migration = migrateLegacyJournal(store);
+
+  assert.equal(migration.status, 'migrated');
+  assert.equal(readLedger(store).openFindings[0]?.id, 'F-setup');
 });
 
 test('reordering otherwise-valid journal lines fails closed', (): void => {
@@ -342,6 +452,49 @@ test('reordering otherwise-valid journal lines fails closed', (): void => {
   writeFileSync(store.journalPath, `${lines[1]}\n${lines[0]}\n`);
   assert.throws(() => readLedger(store), /monotonic|sequence|manual recovery/);
   assert.throws(() => recordReview(root, first, makeReport(first), loaded.policy), /monotonic|sequence|manual recovery/);
+});
+
+test('legacy migration refuses same-head ambiguity, reordered runs, and missing history', (): void => {
+  const loaded = loadTestPolicy();
+  const root = stateRoot();
+  const first = makeSnapshotFixture(loaded, { previousHeadSha: null, runId: 'run-1' });
+  recordReview(root, first, { verdict: 'malformed' }, loaded.policy);
+  const sameHead = makeSnapshotFixture(loaded, { headSha: NEXT_SHA, previousHeadSha: null, runId: 'run-2' });
+  recordReview(root, sameHead, { verdict: 'malformed' }, loaded.policy);
+  const store = prStore(root, ALLOWED_REPOSITORY, 17);
+  const lines = readFileSync(store.journalPath, 'utf8').split('\n').filter((line) => line.trim().length > 0);
+  writeFileSync(store.journalPath, lines.map((line) => {
+    const entry = JSON.parse(line);
+    delete entry.seq;
+    delete entry.previousLedger;
+    return JSON.stringify(entry);
+  }).join('\n') + '\n');
+  const ambiguous = readFileSync(store.journalPath, 'utf8');
+  assert.throws(() => migrateLegacyJournal(store), /ambiguous/);
+  assert.equal(readFileSync(store.journalPath, 'utf8'), ambiguous);
+
+  const otherRoot = stateRoot();
+  const ordered = makeSnapshotFixture(loaded);
+  recordReview(otherRoot, ordered, makeReport(ordered), loaded.policy);
+  const next = makeSnapshotFixture(loaded, { headSha: NEXT_SHA, previousHeadSha: FIRST_SHA, runId: 'run-2' });
+  recordReview(otherRoot, next, makeReport(next), loaded.policy);
+  const otherStore = prStore(otherRoot, ALLOWED_REPOSITORY, 17);
+  const orderedLines = readFileSync(otherStore.journalPath, 'utf8').split('\n').filter((line) => line.trim().length > 0);
+  writeFileSync(otherStore.journalPath, orderedLines.map((line) => {
+    const entry = JSON.parse(line);
+    delete entry.seq;
+    delete entry.previousLedger;
+    return JSON.stringify(entry);
+  }).reverse().join('\n') + '\n');
+  const reversed = readFileSync(otherStore.journalPath, 'utf8');
+  assert.throws(() => migrateLegacyJournal(otherStore), /contradicts|no transition|manual recovery/);
+  assert.equal(readFileSync(otherStore.journalPath, 'utf8'), reversed);
+
+  const emptyRoot = stateRoot();
+  const emptyStore = prStore(emptyRoot, ALLOWED_REPOSITORY, 17);
+  mkdirSync(emptyStore.dir, { recursive: true });
+  writeFileSync(emptyStore.journalPath, '\n');
+  assert.throws(() => migrateLegacyJournal(emptyStore), /empty|manual recovery/);
 });
 
 test('a valid ledger cache without journal or runs requires manual recovery', (): void => {

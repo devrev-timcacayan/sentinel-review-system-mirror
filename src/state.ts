@@ -283,25 +283,109 @@ function readJournal(store: PrStore, runs: RunRecord[]): JournalEntry[] | null {
   return entries;
 }
 
-export function migrateLegacyJournal(store: PrStore): { migrated: number; alreadyCurrent: boolean } {
-  if (!existsSync(store.journalPath)) throw stateError(store, 'no journal exists to migrate', store.journalPath);
-  const runs = readRuns(store);
-  const lines = readFileSync(store.journalPath, 'utf8').split('\n').filter((line: string): boolean => line.trim().length > 0);
-  const entries: JournalEntry[] = [];
-  let alreadyCurrent = true;
-  lines.forEach((line: string, index: number): void => {
-    const parsed = parseJournalLine(store, line, index);
-    const previousLedger = index === 0 ? emptyLedger(store.repository, store.pullRequest) : entries[index - 1].ledger;
-    if (parsed.seq !== index + 1 || parsed.previousLedger === null || canonicalJson(parsed.previousLedger) !== canonicalJson(previousLedger)) {
-      alreadyCurrent = false;
-    }
-    entries.push({ runId: parsed.runId, recordedAt: parsed.recordedAt, seq: index + 1, previousLedger, ledger: parsed.ledger });
+export interface JournalMigrationResult {
+  migrated: number;
+  alreadyCurrent: boolean;
+  status: 'migrated' | 'already-current';
+  backupPath: string | null;
+}
+
+function legacyTransitionIsCompatible(previous: ReviewLedger, run: RunRecord): boolean {
+  if (run.snapshot.previousHeadSha !== previous.lastHeadSha) return false;
+  const next = run.decision.ledger;
+  const nextFindings = new Map(next.openFindings.map((finding) => [finding.id, finding]));
+  const retainsPriorFindings = previous.openFindings.every((finding) => {
+    const retained = nextFindings.get(finding.id);
+    return retained !== undefined && retained.ruleId === finding.ruleId && retained.severity === finding.severity;
   });
-  assertJournalMatchesRuns(store, runs, entries);
-  const temp = `${store.journalPath}.${process.pid}.${randomUUID()}.tmp`;
-  writeFileExclusive(temp, `${entries.map((entry: JournalEntry): string => JSON.stringify(entry)).join('\n')}\n`);
-  renameSync(temp, store.journalPath);
-  return { migrated: entries.length, alreadyCurrent };
+  if (!retainsPriorFindings) return false;
+  if (run.decision.status === 'incomplete') return next.lastHeadSha === previous.lastHeadSha;
+  if (next.lastHeadSha !== run.snapshot.identity.headSha) return false;
+  const hasBlocker = next.openFindings.some((finding) => finding.severity === 'blocker');
+  return run.decision.status === 'changes_required' ? hasBlocker : !hasBlocker;
+}
+
+function orderLegacyEntriesConservatively(store: PrStore, runs: RunRecord[], entries: JournalEntry[]): void {
+  if (entries.length !== runs.length || entries.length === 0) {
+    throw stateError(store, 'legacy journal and immutable run history are missing or incomplete', store.journalPath);
+  }
+  const remaining = new Map(runs.map((run) => [run.runId, run]));
+  let prior = emptyLedger(store.repository, store.pullRequest);
+  for (let index = 0; index < entries.length; index += 1) {
+    const compatible = [...remaining.values()].filter((run) => legacyTransitionIsCompatible(prior, run));
+    if (compatible.length !== 1) {
+      throw stateError(store, compatible.length === 0
+        ? `legacy order has no transition compatible with immutable snapshot evidence at position ${index + 1}`
+        : `legacy history is ambiguous: ${compatible.length} immutable runs are compatible at position ${index + 1}`,
+      store.journalPath);
+    }
+    const run = compatible[0];
+    if (entries[index].runId !== run.runId) {
+      throw stateError(store, `legacy journal order contradicts the uniquely compatible immutable run ${run.runId} at position ${index + 1}`, store.journalPath);
+    }
+    remaining.delete(run.runId);
+    prior = run.decision.ledger;
+  }
+}
+
+export function migrateLegacyJournal(store: PrStore): JournalMigrationResult {
+  return withPrLock(store, (): JournalMigrationResult => {
+    if (!existsSync(store.journalPath)) throw stateError(store, 'no journal exists to migrate', store.journalPath);
+    const runs = readRuns(store);
+    const journalBytes = readFileSync(store.journalPath);
+    const lines = journalBytes.toString('utf8').split('\n').filter((line: string): boolean => line.trim().length > 0);
+    if (lines.length === 0) throw stateError(store, 'journal history is empty; there is nothing safe to migrate', store.journalPath);
+    const fieldPresence = lines.map((line: string, index: number): { seq: boolean; previousLedger: boolean } => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch (error) {
+        throw stateError(store, `unparseable journal line ${index + 1}: ${(error as Error).message}`, store.journalPath);
+      }
+      if (!isObject(parsed)) throw stateError(store, `journal line ${index + 1} is not an object`, store.journalPath);
+      return { seq: Object.hasOwn(parsed, 'seq'), previousLedger: Object.hasOwn(parsed, 'previousLedger') };
+    });
+    const isCurrent = fieldPresence.every((fields) => fields.seq && fields.previousLedger);
+    const isLegacy = fieldPresence.every((fields) => !fields.seq && !fields.previousLedger);
+    if (!isCurrent && !isLegacy) {
+      throw stateError(store, 'journal mixes legacy and current sequencing fields or contains a partial sequencing record', store.journalPath);
+    }
+    if (isCurrent) {
+      const entries = readJournal(store, runs);
+      if (entries === null) throw stateError(store, 'journal disappeared during migration validation', store.journalPath);
+      return { migrated: entries.length, alreadyCurrent: true, status: 'already-current', backupPath: null };
+    }
+    const entries: JournalEntry[] = [];
+    lines.forEach((line: string, index: number): void => {
+      const parsed = parseJournalLine(store, line, index);
+      const previousLedger = index === 0 ? emptyLedger(store.repository, store.pullRequest) : entries[index - 1].ledger;
+      entries.push({ runId: parsed.runId, recordedAt: parsed.recordedAt, seq: index + 1, previousLedger, ledger: parsed.ledger });
+    });
+    assertJournalMatchesRuns(store, runs, entries);
+    orderLegacyEntriesConservatively(store, runs, entries);
+    const backupPath = `${store.journalPath}.${new Date().toISOString().replace(/[:.]/g, '-')}.${randomUUID()}.legacy.bak`;
+    const backupFd = openSync(backupPath, 'wx', 0o600);
+    try {
+      writeBufferCompletely(backupFd, journalBytes);
+    } catch (error) {
+      closeSync(backupFd);
+      throw stateError(store, `could not preserve original journal in backup ${backupPath}: ${(error as Error).message}`, store.journalPath);
+    }
+    closeSync(backupFd);
+    const temp = `${store.journalPath}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      const tempFd = openSync(temp, 'wx', 0o600);
+      try {
+        writeBufferCompletely(tempFd, Buffer.from(`${entries.map((entry: JournalEntry): string => JSON.stringify(entry)).join('\n')}\n`));
+      } finally {
+        closeSync(tempFd);
+      }
+      renameSync(temp, store.journalPath);
+    } catch (error) {
+      throw stateError(store, `migration replacement failed; the original journal is preserved at ${backupPath}: ${(error as Error).message}`, store.journalPath);
+    }
+    return { migrated: entries.length, alreadyCurrent: false, status: 'migrated', backupPath };
+  }, 'journal-migrate');
 }
 
 interface ConsistentState {
@@ -378,6 +462,15 @@ function writeFileExclusive(filePath: string, content: string): void {
     writeSync(fd, content);
   } finally {
     closeSync(fd);
+  }
+}
+
+function writeBufferCompletely(fd: number, content: Buffer): void {
+  let offset = 0;
+  while (offset < content.length) {
+    const written = writeSync(fd, content, offset, content.length - offset);
+    if (written <= 0) throw new Error('File write made no progress.');
+    offset += written;
   }
 }
 
