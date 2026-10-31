@@ -8,7 +8,7 @@ import type { Change, DependencyEdge, ReviewSnapshot, SizeAssessment, SourceFile
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/;
 const SOURCE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.d.ts', '.js', '.jsx', '.mjs', '.cjs'] as const;
-const PROBE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.d.ts'] as const;
+const PROBE_EXTENSIONS = SOURCE_EXTENSIONS;
 const INVENTORY_EXCLUDED_SEGMENTS = new Set([
   'node_modules', 'test-results', 'playwright-report', 'blob-report', 'coverage', 'dist', '.artifacts', '.worktrees', '.state',
 ]);

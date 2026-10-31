@@ -198,45 +198,42 @@ interface JournalEntry {
   ledger: ReviewLedger;
 }
 
-function readJournal(store: PrStore, runs: RunRecord[]): JournalEntry[] | null {
-  if (!existsSync(store.journalPath)) return null;
-  const lines = readFileSync(store.journalPath, 'utf8').split('\n').filter((line: string): boolean => line.trim().length > 0);
-  const entries: JournalEntry[] = [];
-  lines.forEach((line: string, index: number): void => {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch (error) {
-      throw stateError(store, `unparseable journal line ${index + 1}: ${(error as Error).message}`, store.journalPath);
-    }
-    if (!isObject(parsed)) throw stateError(store, `journal line ${index + 1} is not an object`, store.journalPath);
-    if (typeof parsed.runId !== 'string' || !RUN_ID_PATTERN.test(parsed.runId)) {
-      throw stateError(store, `journal line ${index + 1} has unsafe runId`, store.journalPath);
-    }
-    if (typeof parsed.recordedAt !== 'string' || parsed.recordedAt.trim().length === 0) {
-      throw stateError(store, `journal line ${index + 1} missing recordedAt`, store.journalPath);
-    }
+interface ParsedJournalLine {
+  runId: string;
+  recordedAt: string;
+  seq: number | null;
+  previousLedger: ReviewLedger | null;
+  ledger: ReviewLedger;
+}
+
+function parseJournalLine(store: PrStore, line: string, index: number): ParsedJournalLine {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch (error) {
+    throw stateError(store, `unparseable journal line ${index + 1}: ${(error as Error).message}`, store.journalPath);
+  }
+  if (!isObject(parsed)) throw stateError(store, `journal line ${index + 1} is not an object`, store.journalPath);
+  if (typeof parsed.runId !== 'string' || !RUN_ID_PATTERN.test(parsed.runId)) {
+    throw stateError(store, `journal line ${index + 1} has unsafe runId`, store.journalPath);
+  }
+  if (typeof parsed.recordedAt !== 'string' || parsed.recordedAt.trim().length === 0) {
+    throw stateError(store, `journal line ${index + 1} missing recordedAt`, store.journalPath);
+  }
+  let seq: number | null = null;
+  if (parsed.seq !== undefined) {
     if (!Number.isSafeInteger(parsed.seq) || (parsed.seq as number) < 1) {
       throw stateError(store, `journal line ${index + 1} has an invalid sequence number`, store.journalPath);
     }
-    entries.push({
-      runId: parsed.runId,
-      recordedAt: parsed.recordedAt,
-      seq: parsed.seq as number,
-      previousLedger: validateLedgerShape(parsed.previousLedger, store, `${store.journalPath} line ${index + 1} previousLedger`),
-      ledger: validateLedgerShape(parsed.ledger, store, `${store.journalPath} line ${index + 1}`),
-    });
-  });
-  for (let index = 0; index < entries.length; index += 1) {
-    const entry = entries[index];
-    if (entry.seq !== index + 1) {
-      throw stateError(store, `journal sequence ${entry.seq} at line ${index + 1} breaks the monotonic entry order`, store.journalPath);
-    }
-    const expectedPrevious = index === 0 ? emptyLedger(store.repository, store.pullRequest) : entries[index - 1].ledger;
-    if (canonicalJson(entry.previousLedger) !== canonicalJson(expectedPrevious)) {
-      throw stateError(store, `journal line ${index + 1} commits to a different previous ledger than the chain produces`, store.journalPath);
-    }
+    seq = parsed.seq as number;
   }
+  const previousLedger = parsed.previousLedger === undefined ? null
+    : validateLedgerShape(parsed.previousLedger, store, `${store.journalPath} line ${index + 1} previousLedger`);
+  const ledger = validateLedgerShape(parsed.ledger, store, `${store.journalPath} line ${index + 1}`);
+  return { runId: parsed.runId, recordedAt: parsed.recordedAt, seq, previousLedger, ledger };
+}
+
+function assertJournalMatchesRuns(store: PrStore, runs: RunRecord[], entries: JournalEntry[]): void {
   const runsById = new Map(runs.map((run: RunRecord): [string, RunRecord] => [run.runId, run]));
   const journaled = new Set<string>();
   for (const entry of entries) {
@@ -260,7 +257,51 @@ function readJournal(store: PrStore, runs: RunRecord[]): JournalEntry[] | null {
       throw stateError(store, `immutable run ${run.runId} was never journaled`, store.runsDir);
     }
   }
+}
+
+function readJournal(store: PrStore, runs: RunRecord[]): JournalEntry[] | null {
+  if (!existsSync(store.journalPath)) return null;
+  const lines = readFileSync(store.journalPath, 'utf8').split('\n').filter((line: string): boolean => line.trim().length > 0);
+  const entries: JournalEntry[] = lines.map((line: string, index: number): JournalEntry => {
+    const parsed = parseJournalLine(store, line, index);
+    if (parsed.seq === null || parsed.previousLedger === null) {
+      throw stateError(store, `journal line ${index + 1} is missing sequencing fields; run journal-migrate to upgrade legacy state`, store.journalPath);
+    }
+    return { runId: parsed.runId, recordedAt: parsed.recordedAt, seq: parsed.seq, previousLedger: parsed.previousLedger, ledger: parsed.ledger };
+  });
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    if (entry.seq !== index + 1) {
+      throw stateError(store, `journal sequence ${entry.seq} at line ${index + 1} breaks the monotonic entry order`, store.journalPath);
+    }
+    const expectedPrevious = index === 0 ? emptyLedger(store.repository, store.pullRequest) : entries[index - 1].ledger;
+    if (canonicalJson(entry.previousLedger) !== canonicalJson(expectedPrevious)) {
+      throw stateError(store, `journal line ${index + 1} commits to a different previous ledger than the chain produces`, store.journalPath);
+    }
+  }
+  assertJournalMatchesRuns(store, runs, entries);
   return entries;
+}
+
+export function migrateLegacyJournal(store: PrStore): { migrated: number; alreadyCurrent: boolean } {
+  if (!existsSync(store.journalPath)) throw stateError(store, 'no journal exists to migrate', store.journalPath);
+  const runs = readRuns(store);
+  const lines = readFileSync(store.journalPath, 'utf8').split('\n').filter((line: string): boolean => line.trim().length > 0);
+  const entries: JournalEntry[] = [];
+  let alreadyCurrent = true;
+  lines.forEach((line: string, index: number): void => {
+    const parsed = parseJournalLine(store, line, index);
+    const previousLedger = index === 0 ? emptyLedger(store.repository, store.pullRequest) : entries[index - 1].ledger;
+    if (parsed.seq !== index + 1 || parsed.previousLedger === null || canonicalJson(parsed.previousLedger) !== canonicalJson(previousLedger)) {
+      alreadyCurrent = false;
+    }
+    entries.push({ runId: parsed.runId, recordedAt: parsed.recordedAt, seq: index + 1, previousLedger, ledger: parsed.ledger });
+  });
+  assertJournalMatchesRuns(store, runs, entries);
+  const temp = `${store.journalPath}.${process.pid}.${randomUUID()}.tmp`;
+  writeFileExclusive(temp, `${entries.map((entry: JournalEntry): string => JSON.stringify(entry)).join('\n')}\n`);
+  renameSync(temp, store.journalPath);
+  return { migrated: entries.length, alreadyCurrent };
 }
 
 interface ConsistentState {
@@ -394,7 +435,9 @@ export function recordReview(
       if (!identical) {
         throw new Error(`Run ${runId} already exists with different content; refusing to overwrite the immutable record at ${runPath}.`);
       }
-      const superseded = canonicalJson(existing.decision.ledger) !== canonicalJson(state.ledger);
+      const latest = state.journal !== null && state.journal.length > 0 ? state.journal[state.journal.length - 1] : null;
+      const superseded = latest === null || latest.runId !== runId
+        || canonicalJson(existing.decision.ledger) !== canonicalJson(state.ledger);
       return { decision: existing.decision, replayed: true, superseded };
     }
     const previous = state.ledger;

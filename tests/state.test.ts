@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 import type { Finding, ReviewReport } from '../src/contracts.ts';
-import { acquirePrLock, prStore, readLedger, recordReview, withPrLock } from '../src/state.ts';
+import { acquirePrLock, migrateLegacyJournal, prStore, readLedger, recordReview, withPrLock } from '../src/state.ts';
 import { loadTestPolicy, makeReport, makeSnapshotFixture, ALLOWED_REPOSITORY } from './helpers.ts';
 
 const FIRST_SHA = 'a'.repeat(40);
@@ -288,6 +288,45 @@ test('an identical replay after intervening state is flagged superseded, not a f
   assert.equal(replay.superseded, true, 'a newer ledger must prevent the old pass from standing as current state');
   assert.equal(replay.decision.status, 'pass', 'the historical decision is returned as historical data only');
   assert.equal(readLedger(prStore(root, ALLOWED_REPOSITORY, 17)).openFindings.length, 1);
+});
+
+test('an intervening incomplete run supersedes an older pass even when the ledger is unchanged', (): void => {
+  const root = stateRoot();
+  const loaded = loadTestPolicy();
+  const first = makeSnapshotFixture(loaded);
+  recordReview(root, first, makeReport(first), loaded.policy);
+  const second = makeSnapshotFixture(loaded, { headSha: FIRST_SHA, previousHeadSha: FIRST_SHA, runId: 'run-2' });
+  const stalled = recordReview(root, second, makeReport(second, { complete: false, limitations: ['Required context unavailable.'] }), loaded.policy);
+  assert.equal(stalled.decision.status, 'incomplete');
+  assert.equal(readLedger(prStore(root, ALLOWED_REPOSITORY, 17)).lastHeadSha, FIRST_SHA);
+  const replay = recordReview(root, first, makeReport(first), loaded.policy);
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.superseded, true, 'the newer journaled run supersedes the old pass even without ledger drift');
+});
+
+test('legacy journals upgrade through explicit migration preserving history', (): void => {
+  const root = stateRoot();
+  const loaded = loadTestPolicy();
+  const first = makeSnapshotFixture(loaded);
+  recordReview(root, first, makeReport(first), loaded.policy);
+  const second = makeSnapshotFixture(loaded, { headSha: NEXT_SHA, previousHeadSha: FIRST_SHA, runId: 'run-2' });
+  recordReview(root, second, reportWithBlocker(second), loaded.policy);
+  const store = prStore(root, ALLOWED_REPOSITORY, 17);
+  const lines = readFileSync(store.journalPath, 'utf8').split('\n').filter((line) => line.trim().length > 0);
+  writeFileSync(store.journalPath, lines.map((line) => {
+    const entry = JSON.parse(line) as Record<string, unknown>;
+    delete entry.seq;
+    delete entry.previousLedger;
+    return JSON.stringify(entry);
+  }).join('\n') + '\n');
+  assert.throws(() => readLedger(store), /sequencing|journal-migrate|manual recovery/);
+  const migrated = migrateLegacyJournal(store);
+  assert.equal(migrated.migrated, 2);
+  assert.equal(migrated.alreadyCurrent, false);
+  assert.equal(readLedger(store).openFindings.length, 1);
+  const swapped = readFileSync(store.journalPath, 'utf8').split('\n').filter((line) => line.trim().length > 0);
+  writeFileSync(store.journalPath, `${swapped[1]}\n${swapped[0]}\n`);
+  assert.throws(() => readLedger(store), /monotonic|sequence|manual recovery/);
 });
 
 test('reordering otherwise-valid journal lines fails closed', (): void => {

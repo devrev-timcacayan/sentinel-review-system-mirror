@@ -120,6 +120,8 @@ export interface Reconciliation {
 export interface ReviewReport {
   schemaVersion: 1;
   identity: ReviewIdentity;
+  // Required whenever the request snapshot carries partitionScope: echo the supplied
+  // manifestDigest and partitionId verbatim. Must be absent for non-partitioned requests.
   partitionScope?: { manifestDigest: string; partitionId: string };
   complete: boolean;
   limitations: string[];

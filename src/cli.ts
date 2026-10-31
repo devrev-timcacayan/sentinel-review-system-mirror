@@ -8,7 +8,7 @@ import type { LoadedPolicy } from './policy.ts';
 import { collectSnapshot, resolveRefToSha, validateSnapshot } from './snapshot.ts';
 import { buildReviewBundle } from './partitionPlanner.ts';
 import { projectPartition } from './partitionContract.ts';
-import { defaultStateRoot, prStore, readLedger, recordReview, withPrLock } from './state.ts';
+import { defaultStateRoot, migrateLegacyJournal, prStore, readLedger, recordReview, withPrLock } from './state.ts';
 import { prepareRetrospective, validateCloseEvent } from './retrospective.ts';
 import type { PartitionManifest, ReviewLedger, ReviewSnapshot } from './contracts.ts';
 
@@ -19,6 +19,7 @@ Usage:
   cli prepare-bundle --checkout PATH --repository OWNER/REPO --pr N --base REF --head REF --run-id ID [--previous-head REF] --out DIR [--state-root PATH] [--system-root PATH]
   cli record --snapshot FILE --report FILE [--state-root PATH] [--system-root PATH]
   cli retrospective --repository OWNER/REPO --pr N --event FILE --out DIR [--state-root PATH] [--system-root PATH]
+  cli journal-migrate --repository OWNER/REPO --pr N [--state-root PATH] [--system-root PATH]
   cli --help
 
 prepare-bundle captures the full source set without the maxFiles entry cap (total byte cap unchanged),
@@ -236,6 +237,28 @@ function commandRecord(args: string[]): number {
   return 3;
 }
 
+function commandJournalMigrate(args: string[]): number {
+  const flags = parseFlags(args, ['repository', 'pr', 'state-root', 'system-root'], ['repository', 'pr']);
+  const systemRoot = path.resolve(flags.get('system-root') ?? defaultSystemRoot());
+  const loaded = loadPolicy(systemRoot);
+  const repository = flags.get('repository') as string;
+  if (!loaded.policy.repositories.includes(repository)) {
+    throw new UsageError(`Repository ${repository} is outside the trusted policy allowlist (${loaded.policy.repositories.join(', ')}).`);
+  }
+  const pullRequest = parsePrNumber(flags.get('pr'));
+  const stateRoot = path.resolve(flags.get('state-root') ?? defaultStateRoot(systemRoot));
+  const store = prStore(stateRoot, repository, pullRequest);
+  const result = withPrLock(store, (): { migrated: number; alreadyCurrent: boolean } => migrateLegacyJournal(store), 'journal-migrate');
+  console.log(JSON.stringify({
+    status: 'migrated',
+    entries: result.migrated,
+    alreadyCurrent: result.alreadyCurrent,
+    journalPath: store.journalPath,
+    note: 'Existing line order was preserved as authoritative. Inspect the journal before trusting migrated history if tampering is possible.',
+  }, null, 2));
+  return 0;
+}
+
 function commandRetrospective(args: string[]): number {
   const flags = parseFlags(args, ['repository', 'pr', 'event', 'out', 'state-root', 'system-root'], ['repository', 'pr', 'event', 'out']);
   const systemRoot = path.resolve(flags.get('system-root') ?? defaultSystemRoot());
@@ -286,6 +309,7 @@ export function runCli(argv: string[]): number {
     if (command === 'prepare-bundle') return commandPrepare(rest, true);
     if (command === 'record') return commandRecord(rest);
     if (command === 'retrospective') return commandRetrospective(rest);
+    if (command === 'journal-migrate') return commandJournalMigrate(rest);
     throw new UsageError(`Unknown command: ${String(command)}\n\n${USAGE}`);
   } catch (error) {
     if (error instanceof UsageError) {

@@ -413,6 +413,25 @@ test('unchanged JavaScript and hidden-directory consumers are captured through t
   assert.ok(snapshot.dependencyEdges.some((edge) => edge.from === '.generated/hidden.ts' && edge.to === 'src/dep.ts'));
 });
 
+test('extensionless JavaScript dependencies and index directories resolve without incompleteness', (): void => {
+  const repo = makeRepo();
+  repo.write('src/dep.ts', 'export const value = 1;\n');
+  repo.write('lib/helper.js', 'export const helper = 1;\n');
+  repo.write('lib/dir/index.js', 'export const idx = 1;\n');
+  repo.write('lib/caller.cjs', 'const h = require("./helper");\nconst d = require("./dir");\nconst v = require("../src/dep");\nmodule.exports = { h, d, v };\n');
+  repo.commit('base');
+  repo.git(['branch', 'base']);
+  repo.write('src/dep.ts', 'export const value = 2;\n');
+  repo.commit('head');
+  repo.git(['branch', '-f', 'head', 'HEAD']);
+  const snapshot = collectSnapshot(baseOptions(repo), loadTestPolicy({ contextPaths: [] }));
+  assert.equal(snapshot.complete, true, `unexpected limitations: ${snapshot.limitations.join('; ')}`);
+  assert.ok(snapshot.files.some((file) => file.path === 'lib/caller.cjs'), 'CommonJS consumer must be captured');
+  assert.ok(snapshot.dependencyEdges.some((edge) => edge.from === 'lib/caller.cjs' && edge.to === 'lib/helper.js'));
+  assert.ok(snapshot.dependencyEdges.some((edge) => edge.from === 'lib/caller.cjs' && edge.to === 'lib/dir/index.js'));
+  assert.ok(!snapshot.limitations.some((line) => line.includes('caller.cjs')));
+});
+
 test('policy context forward dependencies are selected and dependency-closed', (): void => {
   const repo = makeRepo();
   repo.write('playwright.config.ts', 'import { setup } from "./src/setup";\nexport const config = setup;\n');
