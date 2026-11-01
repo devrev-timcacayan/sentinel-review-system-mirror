@@ -59,6 +59,7 @@ test('count-tokens sends the exact payload through pinned regional endpoint args
   assert.ok(args.includes('bedrock-runtime') && args.includes('count-tokens'));
   assert.ok(args.includes('--region') && args.includes('us-east-1'));
   assert.ok(args.includes('https://bedrock-runtime.us-east-1.amazonaws.com'), 'endpoint pinned to the configured region');
+  assert.equal(args[args.indexOf('--cli-read-timeout') + 1], '30', 'CLI read timeout derived from the verified timeoutMs');
   assert.ok(args.some((arg) => arg.startsWith('file://')), 'payload passed as immutable file reference');
   assert.equal(env.AWS_MAX_ATTEMPTS, '1');
   assert.equal(env.AWS_CLI_AUTO_PROMPT, 'off');

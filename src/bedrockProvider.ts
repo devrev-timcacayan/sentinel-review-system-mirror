@@ -78,6 +78,7 @@ export function createBedrockProvider(
     writeFileSync(payloadPath, JSON.stringify(payload), { mode: 0o600 });
     const args = [
       '--no-cli-pager', '--region', region, '--endpoint-url', endpoint,
+      '--cli-read-timeout', String(Math.ceil(config.timeoutMs / 1000)),
       'bedrock-runtime', operation, '--cli-input-json', `file://${path.resolve(payloadPath)}`, '--output', 'json',
     ];
     let outcome: ExecOutcome;
