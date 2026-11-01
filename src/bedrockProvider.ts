@@ -107,6 +107,10 @@ export function createBedrockProvider(
   return {
     config,
     countTokens: async (request: ProviderRequest, artifactDirectory: string): Promise<number> => {
+      if (config.tokenCountMode === 'estimate') {
+        const bytes = Buffer.byteLength(request.system, 'utf8') + Buffer.byteLength(request.user, 'utf8');
+        return Math.ceil(bytes / 3);
+      }
       const payload = {
         modelId: config.countTokensModelId ?? request.modelId,
         input: {

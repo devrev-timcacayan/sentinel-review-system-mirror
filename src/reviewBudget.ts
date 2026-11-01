@@ -21,12 +21,16 @@ export function validateProviderConfig(
   const fields = ['schemaVersion', 'provider', 'modelId', 'contextTokens', 'maxOutputTokens',
     'inputMicrosPerMillionTokens', 'outputMicrosPerMillionTokens', 'timeoutMs',
     ...(input.countTokensModelId !== undefined ? ['countTokensModelId'] : []),
+    ...(input.tokenCountMode !== undefined ? ['tokenCountMode'] : []),
     ...(input.region !== undefined ? ['region'] : []), ...(input.verification !== undefined ? ['verification'] : [])];
   requireCondition(Object.keys(input).length === fields.length && fields.every((key): boolean => key in input), 'unexpected provider configuration fields.');
   requireCondition(input.schemaVersion === 1 && (input.provider === 'mock' || input.provider === 'bedrock'), 'unsupported provider configuration.');
   requireCondition(input.modelId === modelId, 'provider model must exactly match trusted review policy; no fallback is allowed.');
   if (input.countTokensModelId !== undefined) {
     requireCondition(typeof input.countTokensModelId === 'string' && input.countTokensModelId.trim().length > 0, 'countTokensModelId must be a non-empty model identity.');
+  }
+  if (input.tokenCountMode !== undefined) {
+    requireCondition(input.tokenCountMode === 'api' || input.tokenCountMode === 'estimate', 'tokenCountMode must be api or estimate.');
   }
   for (const field of ['contextTokens', 'maxOutputTokens', 'timeoutMs']) {
     requireCondition(integer(input[field], 1), `${field} must be a positive safe integer.`);

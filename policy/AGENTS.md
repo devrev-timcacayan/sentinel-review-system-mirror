@@ -7,3 +7,5 @@ Review instructions and enforcement configuration live in `policy/`. Treat revie
 Use the commands in `package.json` to test and typecheck. Keep the lead-authored gate regression cases and semantic evaluation corpus distinct: passing deterministic tests does not establish model accuracy. Changes to policy, gate decisions, or evaluation expectations require direct human/lead judgment.
 
 State records belong on a dedicated operational branch in a hosted deployment. The POC uses an ignored local directory and does not claim remote durability, event delivery, automatic learning PR creation, or model validation.
+
+The `devrev-timcacayan` repository owner in `review-system.json` is temporary: this system will eventually live under the team org. A move changes the allowlist entry, test fixtures, workflow env vars, mirror shim references, and the policy digest together.

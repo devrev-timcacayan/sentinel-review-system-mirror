@@ -12,6 +12,9 @@ export interface ReviewProviderConfig {
   // Optional model identity used only for the count-tokens operation when the
   // review model's inference profile does not support it. Invoke always uses modelId.
   countTokensModelId?: string;
+  // 'api' (default) calls bedrock count-tokens. 'estimate' uses a deterministic
+  // local estimate when the model does not support the count-tokens operation.
+  tokenCountMode?: 'api' | 'estimate';
   region?: string;
   contextTokens: number;
   maxOutputTokens: number;
