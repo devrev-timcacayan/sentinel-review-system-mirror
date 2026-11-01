@@ -144,11 +144,13 @@ export function createBedrockProvider(
       for (const block of message.content as unknown[]) {
         const keys = block === null || typeof block !== 'object' || Array.isArray(block)
           ? [] : Object.keys(block as Record<string, unknown>);
+        if (keys.length === 1 && keys[0] === 'reasoningContent') continue;
         if (keys.length !== 1 || keys[0] !== 'text' || typeof (block as Record<string, unknown>).text !== 'string') {
           throw new Error('Bedrock converse returned a non-text content block.');
         }
         texts.push((block as Record<string, unknown>).text as string);
       }
+      if (texts.length === 0) throw new Error('Bedrock converse returned no text content block.');
       const usage = response.usage as Record<string, unknown> | undefined;
       const inputTokens = usage?.inputTokens;
       const outputTokens = usage?.outputTokens;
