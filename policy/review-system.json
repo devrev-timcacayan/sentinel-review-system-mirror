@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "repositories": ["devrev-timcacayan/sentinel-mirror"],
+  "repositories": ["devrev-timcacayan/sentinel-mirror", "devrev/sentinel"],
   "model": "global.anthropic.claude-sonnet-5-5",
   "dimensions": ["test-validity", "reliability-impact", "maintainability"],
   "limits": {
