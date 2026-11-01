@@ -9,6 +9,9 @@ export interface ReviewProviderConfig {
   schemaVersion: 1;
   provider: 'mock' | 'bedrock';
   modelId: string;
+  // Optional model identity used only for the count-tokens operation when the
+  // review model's inference profile does not support it. Invoke always uses modelId.
+  countTokensModelId?: string;
   region?: string;
   contextTokens: number;
   maxOutputTokens: number;

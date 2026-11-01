@@ -108,7 +108,7 @@ export function createBedrockProvider(
     config,
     countTokens: async (request: ProviderRequest, artifactDirectory: string): Promise<number> => {
       const payload = {
-        modelId: request.modelId,
+        modelId: config.countTokensModelId ?? request.modelId,
         input: {
           converse: {
             system: [{ text: request.system }],
