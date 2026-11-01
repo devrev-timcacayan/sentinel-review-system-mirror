@@ -6,7 +6,7 @@
   "limits": {
     "maxFiles": 200,
     "maxSourceBytes": 4000000,
-    "maxPartSourceBytes": 1500000,
+    "maxPartSourceBytes": 1300000,
     "maxDiffBytes": 1000000,
     "warnChangedLines": 800,
     "blockChangedLines": 1500
