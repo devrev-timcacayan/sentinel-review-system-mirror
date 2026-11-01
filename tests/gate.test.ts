@@ -117,7 +117,7 @@ test('advisory and uncertain questions do not become blockers', (): void => {
 test('every provenance field must match the captured review identity', (): void => {
   const mutations: Partial<ReviewReport['identity']>[] = [
     { headSha: NEXT_SHA }, { baseSha: NEXT_SHA }, { mergeBaseSha: NEXT_SHA },
-    { repository: 'devrev/sentinel' }, { pullRequest: 18 }, { model: 'other-model' },
+    { repository: 'devrev/other-repo' }, { pullRequest: 18 }, { model: 'other-model' },
     { policyDigest: 'e'.repeat(64) }, { runId: 'old-run' },
   ];
   for (const mutation of mutations) {
@@ -127,11 +127,11 @@ test('every provenance field must match the captured review identity', (): void 
   }
 });
 
-test('the production repository remains outside the POC allowlist', (): void => {
+test('a repository outside the policy allowlist is refused', (): void => {
   const { snapshot, report, previous } = fixture();
-  snapshot.identity.repository = 'devrev/sentinel';
-  report.identity.repository = 'devrev/sentinel';
-  previous.repository = 'devrev/sentinel';
+  snapshot.identity.repository = 'devrev/other-repo';
+  report.identity.repository = 'devrev/other-repo';
+  previous.repository = 'devrev/other-repo';
   assert.equal(evaluateReview(snapshot, report, previous, POLICY).status, 'incomplete');
 });
 

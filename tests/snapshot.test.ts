@@ -233,7 +233,7 @@ test('malicious refs, unsafe context paths, and forbidden repositories are refus
   const loaded = loadTestPolicy({ contextPaths: [] });
   assert.throws(() => collectSnapshot(baseOptions(repo, { baseRef: '--help' }), loaded), /Unsafe base ref/);
   assert.throws(() => collectSnapshot(baseOptions(repo, { headRef: '-HEAD' }), loaded), /Unsafe head ref/);
-  assert.throws(() => collectSnapshot(baseOptions(repo, { repository: 'devrev/sentinel' }), loaded), /allowlist/);
+  assert.throws(() => collectSnapshot(baseOptions(repo, { repository: 'devrev/other-repo' }), loaded), /allowlist/);
   assert.throws(() => collectSnapshot(baseOptions(repo, { additionalContextPaths: ['../escape.ts'] }), loaded), /Unsafe additional context path/);
   assert.throws(() => collectSnapshot(baseOptions(repo, { additionalContextPaths: ['.env'] }), loaded), /Forbidden additional context path/);
 });
@@ -248,7 +248,7 @@ test('context budget exhaustion is an explicit incomplete limitation, never sile
   repo.write('src/a.ts', 'export const a = 2;\n');
   repo.commit('head');
   repo.git(['branch', '-f', 'head', 'HEAD']);
-  const loaded = loadTestPolicy({ contextPaths: [], limits: { maxFiles: 2, maxSourceBytes: 4_000_000, maxDiffBytes: 1_000_000, warnChangedLines: 800, blockChangedLines: 1500 } });
+  const loaded = loadTestPolicy({ contextPaths: [], limits: { maxFiles: 2, maxSourceBytes: 4_000_000, maxPartSourceBytes: 4_000_000, maxDiffBytes: 1_000_000, warnChangedLines: 800, blockChangedLines: 1500 } });
   const snapshot = collectSnapshot(baseOptions(repo), loaded);
   assert.equal(snapshot.complete, false);
   assert.ok(snapshot.limitations.some((line) => line.includes('Context budget exhausted')));
@@ -482,7 +482,7 @@ test('validateSnapshot accepts collector output and rejects tampering', (): void
   tamperedDigest.identity.policyDigest = '0'.repeat(64);
   assert.throws(() => validateSnapshot(tamperedDigest, loaded), /policyDigest/);
   const tamperedRepo = JSON.parse(JSON.stringify(snapshot));
-  tamperedRepo.identity.repository = 'devrev/sentinel';
+  tamperedRepo.identity.repository = 'devrev/other-repo';
   assert.throws(() => validateSnapshot(tamperedRepo, loaded), /allowlist/);
   const extraField = { ...JSON.parse(JSON.stringify(snapshot)), verdict: 'clean' };
   assert.throws(() => validateSnapshot(extraField, loaded), /top-level fields/);

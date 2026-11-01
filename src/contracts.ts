@@ -152,6 +152,7 @@ export interface ReviewPolicy {
   limits: {
     maxFiles: number;
     maxSourceBytes: number;
+    maxPartSourceBytes: number;
     maxDiffBytes: number;
     warnChangedLines: number;
     blockChangedLines: number;

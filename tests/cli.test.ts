@@ -336,7 +336,7 @@ test('unknown args, duplicates, unsafe identifiers, and missing params are refus
   const prepared = makePreparedRepo();
   assert.equal(cli(prepareArgs(prepared, { extra: ['--bogus', 'x'] })).status, 1);
   assert.equal(cli(prepareArgs(prepared, { extra: ['--pr', '18', '--pr', '18'] })).status, 1);
-  assert.equal(cli(prepareArgs(prepared, { overrides: { repository: 'devrev/sentinel' } })).status, 1);
+  assert.equal(cli(prepareArgs(prepared, { overrides: { repository: 'devrev/other-repo' } })).status, 1);
   assert.equal(cli(prepareArgs(prepared, { overrides: { repository: '../escape' } })).status, 1);
   const missing = cli(['prepare', '--checkout', prepared.repo.dir]);
   assert.equal(missing.status, 1);

@@ -80,6 +80,9 @@ export function validatePartitionManifest(snapshot: ReviewSnapshot, policy: Revi
     if (part.id !== `part-${String(index + 1).padStart(3, '0')}` || !Array.isArray(part.sourceKeys)) fail('partition identity or keys');
     const membership = new Set<string>(part.sourceKeys as string[]);
     if (membership.size !== (part.sourceKeys as string[]).length || membership.size === 0 || membership.size > policy.limits.maxFiles) fail('partition size or duplicate sources');
+    const partBytes = snapshot.files.filter((file): boolean => membership.has(sourceKey(file)))
+      .reduce((total, file): number => total + Buffer.byteLength(file.content), 0);
+    if (partBytes > policy.limits.maxPartSourceBytes) fail('partition exceeds the per-part source-byte budget');
     for (const key of membership) if (typeof key !== 'string' || !known.has(key)) fail('unknown source key');
     for (const key of shared) if (!membership.has(key)) fail('missing shared context');
     const paths = snapshot.files.filter((file): boolean => membership.has(sourceKey(file))).map((file): string => file.path);

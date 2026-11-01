@@ -5,19 +5,19 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { buildReviewBundle } from '../src/partitionPlanner.ts';
-import { projectPartition, sourceKey } from '../src/partitionContract.ts';
+import { projectPartition, sourceKey, validatePartitionManifest } from '../src/partitionContract.ts';
 import { ALLOWED_REPOSITORY, SYSTEM_ROOT, loadTestPolicy, makeRepo, makeReport, seedPolicyContext } from './helpers.ts';
 import type { ReviewPolicy, ReviewSnapshot, SourceFile } from '../src/contracts.ts';
 
 const CLI = path.resolve(fileURLToPath(new URL('../src/cli.ts', import.meta.url)));
 
-function makePolicy(maxFiles = 4, maxSourceBytes = 4_000_000): ReviewPolicy {
+function makePolicy(maxFiles = 4, maxSourceBytes = 4_000_000, maxPartSourceBytes = 4_000_000): ReviewPolicy {
   return {
     schemaVersion: 1,
     repositories: [ALLOWED_REPOSITORY],
     model: 'test-model',
     dimensions: ['test-validity', 'reliability-impact', 'maintainability'],
-    limits: { maxFiles, maxSourceBytes, maxDiffBytes: 1_000_000, warnChangedLines: 800, blockChangedLines: 1500 },
+    limits: { maxFiles, maxSourceBytes, maxPartSourceBytes, maxDiffBytes: 1_000_000, warnChangedLines: 800, blockChangedLines: 1500 },
     contextPaths: [],
     rules: [],
   };
@@ -123,6 +123,67 @@ test('one unsplittable root unit refuses with the explicit root and required cou
   assert.throws(
     () => buildReviewBundle(makeSnapshot(), policy),
     /Partition preparation incomplete: context root src\/d\.ts requires 4 source entries, exceeding maxFiles 3\./,
+  );
+});
+
+test('parts split on source bytes even when the file count would fit', (): void => {
+  const large = 'x'.repeat(60);
+  const snapshot = makeSnapshot({
+    files: [
+      file('src/a.ts', 'base'), file('src/a.ts', 'head'),
+      file('src/b.ts', 'head', large), file('src/c.ts', 'head', large), file('src/d.ts', 'head', large),
+    ],
+  });
+  const manifest = buildReviewBundle(snapshot, makePolicy(20, 4_000_000, 160)).partitionManifest;
+  assert.ok(manifest);
+  assert.equal(manifest.partitions.length, 2);
+  const bytesOf = (keys: string[]): number => snapshot.files
+    .filter((entry) => keys.includes(sourceKey(entry)))
+    .reduce((total, entry) => total + Buffer.byteLength(entry.content), 0);
+  for (const partition of manifest.partitions) {
+    assert.ok(bytesOf(partition.sourceKeys) <= 160, 'no partition exceeds maxPartSourceBytes');
+  }
+  const covered = new Set(manifest.partitions.flatMap((partition) => partition.sourceKeys));
+  assert.deepEqual([...covered].sort(), [...snapshot.files.map(sourceKey)].sort());
+});
+
+test('a context root whose byte closure cannot fit refuses honestly', (): void => {
+  const large = 'x'.repeat(60);
+  const snapshot = makeSnapshot({
+    files: [
+      file('src/a.ts', 'base'), file('src/a.ts', 'head'),
+      file('src/b.ts', 'head', large), file('src/c.ts', 'head', large), file('src/d.ts', 'head', large),
+    ],
+  });
+  assert.throws(
+    () => buildReviewBundle(snapshot, makePolicy(20, 4_000_000, 100)),
+    /context root src\/d\.ts requires 160 source bytes, exceeding maxPartSourceBytes 100\./,
+  );
+});
+
+test('shared context alone exceeding the per-part byte cap refuses', (): void => {
+  const huge = 'x'.repeat(200);
+  const snapshot = makeSnapshot({
+    files: [file('src/a.ts', 'base', huge), file('src/a.ts', 'head', huge)],
+  });
+  assert.throws(
+    () => buildReviewBundle(snapshot, makePolicy(20, 4_000_000, 300)),
+    /required shared context is 400 bytes, exceeding maxPartSourceBytes 300\./,
+  );
+});
+
+test('manifest validation rejects a partition over the byte budget', (): void => {
+  const large = 'x'.repeat(60);
+  const snapshot = makeSnapshot({
+    files: [
+      file('src/a.ts', 'base'), file('src/a.ts', 'head'),
+      file('src/b.ts', 'head', large), file('src/c.ts', 'head', large), file('src/d.ts', 'head', large),
+    ],
+  });
+  const parent = buildReviewBundle(snapshot, makePolicy(20));
+  assert.throws(
+    () => validatePartitionManifest(parent, makePolicy(20, 4_000_000, 100)),
+    /per-part source-byte budget/,
   );
 });
 
