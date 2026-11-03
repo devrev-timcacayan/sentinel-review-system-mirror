@@ -1,0 +1,116 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Lead-authored semantic review seeds, not executed model results or a calibrated benchmark.",
+  "cases": [
+    {
+      "id": "dedup-before-duplicate-assertion",
+      "ruleId": "SR-001",
+      "provenance": "Verified in Sentinel PR 513 at 6140cceff576b853bc59a4344c1401c60a60eb20; fixed helper at eb89145e19a54e3d83f283f3e3528d1c0d0aefa7. This is a reduced source example.",
+      "behavior": "The listed article IDs contain no duplicates.",
+      "source": "const articleIds = [...new Set(raw.map((id) => id.trim()).filter((id) => /^ART-\\d+$/.test(id)))];\nconst duplicateIds = articleIds.filter((id, index) => articleIds.indexOf(id) !== index);\nexpect(duplicateIds).toEqual([]);",
+      "expected": "blocker",
+      "reason": "Input ['ART-5', 'ART-5'] becomes ['ART-5'] before the duplicate assertion. Broken behavior therefore passes the claimed uniqueness check.",
+      "acceptableCounterexample": "Preserve the raw matching IDs in the helper, then check duplicates. Deduplicating for a separate cross-page set comparison is not itself a defect."
+    },
+    {
+      "id": "required-setup-swallowed",
+      "ruleId": "SR-002",
+      "provenance": "Pattern verified in the earliest reviewed revision of Sentinel PR 405; this is a reduced synthetic example.",
+      "behavior": "Create a conversation before validating its contents.",
+      "source": "test.beforeEach(async () => {\n  await createConversation().catch((error: unknown) => console.warn(error));\n});\ntest('shows the new conversation', async ({ conversationsPage }) => {\n  await conversationsPage.assertAnyConversationVisible();\n});",
+      "expected": "blocker",
+      "reason": "Creation can fail while existing data satisfies the assertion.",
+      "acceptableCounterexample": "Let createConversation fail the setup and assert the captured new conversation identity."
+    },
+    {
+      "id": "required-filter-validation-conditional",
+      "ruleId": "SR-002",
+      "provenance": "Reduced synthetic example informed by historical weak-assertion feedback.",
+      "behavior": "The selected stage filter returns the seeded matching conversation.",
+      "source": "await conversationsPage.applyStageFilter('Waiting On User');\nif (await conversationsPage.hasRows()) {\n  await conversationsPage.assertFirstRowStage('Waiting On User');\n}",
+      "expected": "blocker",
+      "reason": "A broken filter returning no rows bypasses the required validation.",
+      "acceptableCounterexample": "Seed the expected conversation and assert its identity and stage without a conditional."
+    },
+    {
+      "id": "optional-dialog-with-required-outcome",
+      "ruleId": "SR-002",
+      "provenance": "Synthetic acceptable exception.",
+      "behavior": "Delete the seeded saved view whether or not this environment displays a confirmation dialog.",
+      "source": "await savedView.delete();\nif (await optionalConfirmIsPresent()) {\n  await confirmDelete.click();\n}\nawait expect(savedView.row).toBeHidden();",
+      "expected": "no-blocker",
+      "reason": "The optional interaction does not make the required deletion outcome optional.",
+      "acceptableCounterexample": "This case itself is the counterexample to a blanket ban on conditionals."
+    },
+    {
+      "id": "cache-oracle-accepts-server-fallback",
+      "ruleId": "SR-003",
+      "provenance": "Reduced synthetic example informed by human discussion on Sentinel PR 511.",
+      "behavior": "Updated widget data is served by the desktop local cache.",
+      "source": "await dashboard.open();\nawait expect(widget.value).toHaveText('4');",
+      "expected": "blocker",
+      "reason": "The same UI value can be produced by server fallback, so the claimed source is unverified.",
+      "acceptableCounterexample": "Correlate the tracked widget query with a successful response from the local cache endpoint, then verify its value."
+    },
+    {
+      "id": "retry-repeats-resource-creation",
+      "ruleId": "SR-004",
+      "provenance": "Synthetic lesson derived from non-idempotent retry and partial-setup lifecycle risks.",
+      "behavior": "Create exactly one record and verify it is shown.",
+      "source": "await expect(async () => {\n  await recordsPage.createRecord(name);\n  await expect(recordsPage.row(name)).toBeVisible({ timeout: 1000 });\n}).toPass({ timeout: 30000 });",
+      "expected": "blocker",
+      "reason": "Creation can succeed before a delayed visibility assertion fails and retries the mutation.",
+      "acceptableCounterexample": "Create once, capture its identity, and retry only the observation."
+    },
+    {
+      "id": "idempotent-readiness-retry",
+      "ruleId": "SR-004",
+      "provenance": "Synthetic acceptable exception to blanket retry restrictions.",
+      "behavior": "Wait until an asynchronously persisted value is visible.",
+      "source": "await recordPage.saveValue(expectedValue);\nawait expect(async () => {\n  await expect(recordPage.value).toHaveText(expectedValue);\n}).toPass({ timeout: 30000 });",
+      "expected": "no-blocker",
+      "reason": "Only observation is retried; the mutation is single-shot.",
+      "acceptableCounterexample": "This case itself is the counterexample."
+    },
+    {
+      "id": "cleanup-identity-captured-too-late",
+      "ruleId": "SR-005",
+      "provenance": "Reduced synthetic example derived from sentinel-development partial-setup cleanup learning.",
+      "behavior": "A created record is cleaned up even when membership setup fails.",
+      "source": "test.beforeEach(async () => {\n  const created = await createRecord();\n  await addMember(created.id);\n  cleanupId = created.id;\n});\ntest.afterEach(async () => {\n  if (cleanupId) await deleteRecord(cleanupId);\n});",
+      "expected": "blocker",
+      "reason": "A member-add failure after creation leaves cleanup without the record identity.",
+      "acceptableCounterexample": "Capture created.id immediately after creation, before any later fallible setup."
+    },
+    {
+      "id": "helper-assertions-count",
+      "ruleId": "SR-001",
+      "provenance": "Synthetic acceptable exception to searching only for expect in test bodies.",
+      "behavior": "Verify the selected account display name.",
+      "source": "test('shows the selected account name', async ({ accountPage }) => {\n  await accountPage.openAccount(expectedId);\n  await accountPage.assertDisplayName(expectedName);\n});\nasync function assertDisplayName(expectedName: string): Promise<void> {\n  await expect(displayName).toHaveText(expectedName);\n}",
+      "expected": "no-blocker",
+      "reason": "The called helper contains a behavior-specific assertion.",
+      "acceptableCounterexample": "This case itself is the counterexample."
+    },
+    {
+      "id": "unrelated-narrow-test-scope",
+      "ruleId": "SR-001",
+      "provenance": "Synthetic acceptable exception.",
+      "behavior": "The switch changes its checked state during the current session.",
+      "source": "await settingsPage.notificationsSwitch.check();\nawait expect(settingsPage.notificationsSwitch).toBeChecked();",
+      "expected": "no-blocker",
+      "reason": "Persistence across reload is outside this declared behavior; missing a persistence check is not a blocker here.",
+      "acceptableCounterexample": "A separate requirement promising persistence would require an additional test."
+    },
+    {
+      "id": "one-consumer-util-is-not-proof",
+      "ruleId": "SR-007",
+      "provenance": "Synthetic acceptable exception.",
+      "behavior": "Parse a downloaded export in a domain-specific module.",
+      "source": "export function parseTicketExport(content: string): TicketExport {\n  return validateTicketExport(JSON.parse(content));\n}",
+      "expected": "no-blocker",
+      "reason": "A single current consumer or utils suffix alone does not demonstrate an ownership defect.",
+      "acceptableCounterexample": "Actual duplicated incompatible UI ownership or a documented architecture violation needs separate evidence."
+    }
+  ]
+}

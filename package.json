@@ -1,0 +1,21 @@
+{
+  "name": "sentinel-review-system",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "cli": "node --experimental-strip-types src/cli.ts",
+    "review": "node --experimental-strip-types src/reviewCli.ts"
+  },
+  "dependencies": {
+    "typescript": "5.9.2"
+  },
+  "devDependencies": {
+    "@types/node": "24.5.2"
+  }
+}

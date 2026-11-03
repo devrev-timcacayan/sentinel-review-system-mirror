@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "repositories": ["devrev-timcacayan/sentinel-mirror", "devrev/sentinel"],
+  "model": "global.anthropic.claude-sonnet-5-5",
+  "dimensions": ["test-validity", "reliability-impact", "maintainability"],
+  "limits": {
+    "maxFiles": 200,
+    "maxSourceBytes": 4000000,
+    "maxPartSourceBytes": 1300000,
+    "maxDiffBytes": 1000000,
+    "warnChangedLines": 800,
+    "blockChangedLines": 1500
+  },
+  "contextPaths": [
+    "CLAUDE.md",
+    "playwright.config.ts",
+    "tsconfig.json",
+    "package.json",
+    "eslint.config.mts",
+    "docs/architecture-guide.md",
+    "docs/best-practices/playwright-locators-hierarchy.md",
+    "docs/best-practices/methods-to-avoid-playwright.md",
+    "docs/best-practices/playwright-assertions-auto-retrying-vs-non-retrying.md"
+  ],
+  "rules": [
+    {
+      "id": "SR-001",
+      "name": "Behavior-specific oracle",
+      "blocking": "The asserted outcome can be satisfied when the behavior claimed by the test or originating requirement is broken. Trace setup, action, and oracle, and demonstrate the false-pass path.",
+      "exception": "Do not demand unrelated behavior outside the requirement. Assertions inside called helpers count. A failed soft assertion still fails a Playwright test."
+    },
+    {
+      "id": "SR-002",
+      "name": "Required setup and validation remain mandatory",
+      "blocking": "An introduced catch, early return, conditional, or runtime skip permits required setup or validation to be bypassed without failing the test.",
+      "exception": "Optional UI handling is legitimate when the required outcome is still asserted. Moving a conditional into a page object does not itself repair a false pass."
+    },
+    {
+      "id": "SR-003",
+      "name": "Identity, environment, and data-source fidelity",
+      "blocking": "The changed flow uses a different actor, org, environment, or data source than its contract, and the oracle cannot distinguish that substitution.",
+      "exception": "A local run or --no-deps flag alone does not prove CI failure. Establish the configured path and mismatch."
+    },
+    {
+      "id": "SR-004",
+      "name": "Retry safety and honest stability",
+      "blocking": "A retry can repeat a completed mutation, invert a toggle, or bypass a failed prerequisite so that the test accepts an incorrect result.",
+      "exception": "Bounded retries of idempotent readiness actions are valid. Increased timeout or retry count is a review signal, not automatic proof of masking. Keep first-attempt and retry-recovered results distinct."
+    },
+    {
+      "id": "SR-005",
+      "name": "Isolation and partial-setup cleanup",
+      "blocking": "A changed lifecycle leaks shared state, breaks independent execution, or loses the identity needed to clean up a resource after partially completed setup.",
+      "exception": "Demonstrate the lifecycle and affected state. Fixed expected counts are valid when setup controls the dataset."
+    },
+    {
+      "id": "SR-006",
+      "name": "Cumulative integration and caller compatibility",
+      "blocking": "The cumulative PR change breaks a reachable caller, fixture, project selection, or shared setup contract, including callers unchanged in the latest push.",
+      "exception": "Read both sides of the dependency and consider base behavior. Pre-existing defects unrelated to the PR are advisory, not new blockers."
+    },
+    {
+      "id": "SR-007",
+      "name": "Ownership and justified abstraction",
+      "blocking": "A concrete violation of an explicit repository architecture contract creates incompatible duplicated behavior or places lifecycle responsibility where it cannot be enforced.",
+      "exception": "A new utils file, a single consumer, a loop, or similar-looking code is not sufficient evidence. Compare existing implementations and actual callers. Pure maintainability preferences are advisory."
+    },
+    {
+      "id": "SR-008",
+      "name": "Reliable observation and synchronization",
+      "blocking": "A changed event subscription, immediate snapshot, selector, or wait can demonstrably miss the relevant state or accept an unrelated element.",
+      "exception": "Use the repository's co-first role/test-id guidance. Do not invent accessible names or test IDs. A fallback selector is not automatically defective."
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "provider": "bedrock",
+  "modelId": null,
+  "region": null,
+  "contextTokens": null,
+  "maxOutputTokens": null,
+  "inputMicrosPerMillionTokens": null,
+  "outputMicrosPerMillionTokens": null,
+  "timeoutMs": null,
+  "verification": {
+    "by": null,
+    "at": null,
+    "expiresAt": null,
+    "evidence": null
+  }
+}
