@@ -10,7 +10,7 @@ import type { AgentPriorCheckpoint } from '../src/agentContracts.ts';
 import { prepareActionReview, validateActionReview } from '../src/agentReview.ts';
 import { completedStateVersion, loadPrState, pendingStateVersion, persistPrState, validateStateIndex, validatePrStateRecord } from '../src/actionState.ts';
 import type { PrStateRecord, StateIndex } from '../src/actionState.ts';
-import { runActionHost } from '../src/actionHost.ts';
+import { diffHeadLines, renderSummary, runActionHost } from '../src/actionHost.ts';
 import type { HostDeps } from '../src/actionHost.ts';
 import { createAgentReportSchema } from '../src/agentSchema.ts';
 import { ALLOWED_REPOSITORY, SYSTEM_ROOT, loadTestPolicy, makeRepo, seedPolicyContext } from './helpers.ts';
@@ -318,6 +318,73 @@ test('workflow templates satisfy the static contract', (): void => {
   assert.doesNotMatch(main, /(gh |hub |curl ).*comment/i);
   assert.doesNotMatch(retired, /anthropics\/claude-code-action|configure-aws-credentials|pull_request_target/);
   assert.doesNotMatch(retired, /pull_request:/);
+});
+
+test('diffHeadLines maps head-side hunk lines per file and ignores binary or deleted entries', (): void => {
+  const diff = [
+    'diff --git a/src/one.ts b/src/one.ts',
+    'index 111..222 100644',
+    '--- a/src/one.ts',
+    '+++ b/src/one.ts',
+    '@@ -1,3 +1,4 @@',
+    ' line',
+    '+added',
+    '@@ -10,2 +11,3 @@',
+    ' line',
+    'diff --git a/src/two.ts b/src/two.ts',
+    '--- a/src/two.ts',
+    '+++ b/src/two.ts',
+    '@@ -1 +1 @@',
+    '-old',
+    '+new',
+    'diff --git a/src/old.ts b/src/new.ts',
+    'similarity index 90%',
+    'rename from src/old.ts',
+    'rename to src/new.ts',
+    '--- a/src/old.ts',
+    '+++ b/src/new.ts',
+    '@@ -3,2 +5,2 @@',
+    ' ctx',
+    'diff --git a/src/gone.ts b/src/gone.ts',
+    'deleted file mode 100644',
+    '--- a/src/gone.ts',
+    '+++ /dev/null',
+    '@@ -1,2 +0,0 @@',
+    '-dead',
+    'diff --git a/img.png b/img.png',
+    'Binary files a/img.png and b/img.png differ',
+    '',
+  ].join('\n');
+  const map = diffHeadLines(diff);
+  assert.deepEqual([...map.get('src/one.ts') ?? []].sort((a: number, b: number): number => a - b), [1, 2, 3, 4, 11, 12, 13]);
+  assert.deepEqual([...map.get('src/two.ts') ?? []], [1], 'omitted hunk count defaults to one line');
+  assert.deepEqual([...map.get('src/new.ts') ?? []], [5, 6], 'renames index under the new path');
+  assert.equal(map.has('src/gone.ts'), false, 'deleted files have no head lines');
+  assert.equal(map.has('img.png'), false, 'binary files carry no hunks');
+});
+
+test('the published summary stays compact and marker-bound', (): void => {
+  const evidence = { path: 'src/action.ts', revision: 'head' as const, startLine: 5, endLine: 5, quote: 'x' };
+  const openFindings = [
+    { id: 'F-one', ruleId: 'SR-002', severity: 'blocker' as const, title: 'First', explanation: 'long explanation', impact: 'long impact', introducedBy: evidence, evidence: [evidence], counterEvidence: [] },
+    { id: 'F-two', ruleId: 'novel', severity: 'question' as const, title: 'Second', explanation: 'e', impact: 'i', introducedBy: evidence, evidence: [evidence], counterEvidence: [] },
+  ];
+  const body = renderSummary(
+    {
+      status: 'changes_required',
+      reasons: ['a', 'b', 'c', 'd', 'e', 'f'],
+      ledger: { schemaVersion: 1, repository: REPO, pullRequest: 17, lastHeadSha: 'a'.repeat(40), openFindings },
+    },
+    'gha-7-3',
+    'https://github.com/devrev/sentinel/actions/runs/7',
+  );
+  const reasonBullets = body.split('**Findings:**')[0].split('\n').filter((line: string): boolean => line.startsWith('- `'));
+  assert.equal(reasonBullets.length, 5, 'reasons cap at five bullets');
+  assert.match(body, /^- \+1 more, see workflow run$/m);
+  assert.match(body, /\*\*Findings:\*\* 1 blocker, 1 question\n- `F-one` \[blocker\] `First` \(`src\/action\.ts`:5\)\n- `F-two` \[question\] `Second` \(`src\/action\.ts`:5\)/);
+  assert.doesNotMatch(body, /long explanation|long impact/);
+  assert.doesNotMatch(body, /—|\\/, 'no em dash or backslash escapes in published text');
+  assert.match(body, /<!-- sentinel-review -->\n$/);
 });
 
 test('manual dispatch workflow exposes one PR input and the canonical guards', (): void => {

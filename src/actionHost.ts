@@ -15,7 +15,7 @@ import { listAgentTree, readAgentSource } from './snapshot.ts';
 import { gitRun, loadPrState, pendingStateVersion, completedStateVersion, persistPrState, validateStateCheckout } from './actionState.ts';
 import type { GitRunner, PrStateRecord } from './actionState.ts';
 import { writePacketFile } from './artifactFiles.ts';
-import type { GateDecision } from './contracts.ts';
+import type { Finding, GateDecision } from './contracts.ts';
 
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const TITLE_PATTERN = /^POC Test: .+-DO NOT REVIEW$/;
@@ -564,25 +564,121 @@ function codeSpan(text: string): string {
   return `\`${sanitizeValue(text)}\``;
 }
 
+const SUMMARY_REASON_LIMIT = 5;
+
 // Trusted template text stays literal Markdown; only model-authored values are
-// sanitized and code-spanned so the summary renders readably.
-function renderSummary(decision: GateDecision, runId: string, runUrl: string): string {
-  const lines = [
-    `## Sentinel review: ${decision.status}`,
-    '',
-    ...decision.reasons.map((reason: string): string => `- ${codeSpan(reason)}`),
-    '',
-    `**Run:** ${codeSpan(runId)} · [workflow run](${runUrl})`,
-  ];
-  if (decision.ledger.openFindings.length > 0) {
-    lines.push('', '### Open findings');
+// sanitized and code-spanned so the summary renders readably. Detail beyond one
+// line per finding lives on the diff as inline review comments, not here.
+export function renderSummary(decision: GateDecision, runId: string, runUrl: string): string {
+  const lines = [`## Sentinel review: ${decision.status}`];
+  if (decision.reasons.length > 0) {
+    lines.push('');
+    for (const reason of decision.reasons.slice(0, SUMMARY_REASON_LIMIT)) lines.push(`- ${codeSpan(reason)}`);
+    const remainder = decision.reasons.length - SUMMARY_REASON_LIMIT;
+    if (remainder > 0) lines.push(`- +${String(remainder)} more, see workflow run`);
+  }
+  // An incomplete decision never validated a report; its ledger only carries
+  // prior state, which must not be presented as this run's findings.
+  if (decision.status !== 'incomplete' && decision.ledger.openFindings.length > 0) {
+    const counts = (['blocker', 'advisory', 'question'] as const)
+      .map((severity: Finding['severity']): string => {
+        const count = decision.ledger.openFindings.filter((finding: Finding): boolean => finding.severity === severity).length;
+        const label = count === 1 ? severity : severity === 'advisory' ? 'advisories' : `${severity}s`;
+        return count === 0 ? '' : `${String(count)} ${label}`;
+      })
+      .filter((entry: string): boolean => entry.length > 0)
+      .join(', ');
+    lines.push('', `**Findings:** ${counts}`);
     for (const finding of decision.ledger.openFindings) {
       lines.push(`- ${codeSpan(finding.id)} [${finding.severity}] ${codeSpan(finding.title)} (${codeSpan(finding.introducedBy.path)}:${String(finding.introducedBy.startLine)})`);
-      lines.push(`  ${codeSpan(finding.explanation)} ${codeSpan(finding.impact)}`);
     }
   }
-  lines.push('', '_Synthetic/offline artifacts are never operational approvals. This check is a required review gate, not a merge decision._', COMMENT_MARKER);
+  lines.push(
+    '',
+    `**Run:** ${codeSpan(runId)} · [workflow run](${runUrl})`,
+    '',
+    '_Synthetic/offline artifacts are never operational approvals. This check is a required review gate, not a merge decision._',
+    COMMENT_MARKER,
+  );
   return `${lines.join('\n')}\n`;
+}
+
+// Maps each diff file to the head-side line numbers covered by its hunks, so a
+// finding can be anchored inline only where the PR review API accepts it.
+export function diffHeadLines(diff: string): Map<string, Set<number>> {
+  const headLines = new Map<string, Set<number>>();
+  let current: Set<number> | null = null;
+  let sawOldMarker = false;
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('--- ')) {
+      sawOldMarker = true;
+      continue;
+    }
+    if (line.startsWith('+++ ') && sawOldMarker) {
+      sawOldMarker = false;
+      const target = line.slice(4).trimEnd();
+      if (target.startsWith('b/')) {
+        current = new Set<number>();
+        headLines.set(target.slice(2), current);
+      } else {
+        current = null;
+      }
+      continue;
+    }
+    sawOldMarker = false;
+    if (current === null) continue;
+    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
+    if (hunk !== null) {
+      const start = Number(hunk[1]);
+      const count = hunk[2] === undefined ? 1 : Number(hunk[2]);
+      for (let offset = 0; offset < count; offset += 1) current.add(start + offset);
+    }
+  }
+  return headLines;
+}
+
+const REVIEW_BODY_LIMIT = 1500;
+
+// Findings publish as plain paragraphs rather than code spans, but each
+// untrusted field is still flattened and stripped before it reaches GitHub.
+function findingReviewBody(finding: Finding): string {
+  const body = [
+    `**[${finding.severity}] ${codeSpan(finding.id)}: ${sanitizeValue(finding.title)}**`,
+    '',
+    sanitizeValue(finding.explanation),
+    '',
+    `**Impact:** ${sanitizeValue(finding.impact)}`,
+  ].join('\n');
+  return body.length > REVIEW_BODY_LIMIT ? `${body.slice(0, REVIEW_BODY_LIMIT - 3)}...` : body;
+}
+
+// Reviews are per-run, not sticky: every validated head posts a fresh review.
+async function postPullReview(deps: HostDeps, ctx: HostContext, decision: GateDecision, cumulativeDiff: string): Promise<void> {
+  const headLines = diffHeadLines(cumulativeDiff);
+  const comments = (inline: boolean): Record<string, unknown>[] =>
+    decision.ledger.openFindings.map((finding: Finding): Record<string, unknown> => {
+      const introduced = finding.introducedBy;
+      const body = findingReviewBody(finding);
+      return inline && introduced.revision === 'head' && headLines.get(introduced.path)?.has(introduced.startLine) === true
+        ? { path: introduced.path, line: introduced.startLine, side: 'RIGHT', body }
+        : { path: introduced.path, subject_type: 'file', body };
+    });
+  const reviewBody = {
+    commit_id: ctx.headSha,
+    event: decision.status === 'changes_required' ? 'REQUEST_CHANGES' : 'COMMENT',
+    body: `Sentinel review: ${decision.status}. Findings inline; summary in the sentinel-review comment.`,
+  };
+  const postReview = (inline: boolean): Promise<HttpResponse> | HttpResponse =>
+    deps.http({
+      method: 'POST',
+      path: `/repos/${REPOSITORY}/pulls/${String(ctx.pullRequest)}/reviews`,
+      body: { ...reviewBody, comments: comments(inline) },
+    });
+  let response = await postReview(true);
+  // A hunk-parse edge can anchor a line GitHub rejects; degrade once to
+  // file-level comments rather than fail a validated decision on positioning.
+  if (response.status === 422) response = await postReview(false);
+  require(response.status >= 200 && response.status < 300, `review publication failed with status ${response.status}`);
 }
 
 const STATUS_CONTEXT = 'sentinel-review';
@@ -779,6 +875,12 @@ async function stageFinalize(deps: HostDeps, options: Record<string, string>): P
       body: { body: commentBody },
     });
   require(publish.status >= 200 && publish.status < 300, `comment publication failed with status ${publish.status}`);
+  // Findings land on the diff as a formal review after the summary succeeds.
+  // An incomplete decision never validated a report, so its findings stay
+  // unpublished even though the ledger may still list prior ones.
+  if (decision.status !== 'incomplete' && decision.ledger.openFindings.length > 0) {
+    await postPullReview(deps, ctx, decision, request.cumulativeDiff);
+  }
   const statusState = decision.status === 'pass' ? 'success' : decision.status === 'changes_required' ? 'failure' : 'error';
   await postCommitStatus(deps, ctx.headSha, statusState, `Sentinel review: ${decision.status}.`);
   githubOutput(deps, { canonical_decision: decision.status });

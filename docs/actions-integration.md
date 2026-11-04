@@ -58,7 +58,8 @@ the reviewer pin. GitHub API calls are limited to:
 `GET /repos/devrev/sentinel/pulls/N`, `GET
 /repos/devrev/sentinel/actions/runs/RUN`, `GET` and `POST` on
 `/repos/devrev/sentinel/issues/N/comments`, `PATCH` on
-`/repos/devrev/sentinel/issues/comments/<id>`, and `POST` to
+`/repos/devrev/sentinel/issues/comments/<id>`, `POST` to
+`/repos/devrev/sentinel/pulls/N/reviews`, and `POST` to
 `/repos/devrev/sentinel/statuses/<headSha>`
 (fixed `sentinel-review` context: `start-status` pending,
 `fail-status` error, `finalize` terminal decision). `start-status` and
@@ -95,7 +96,16 @@ preparation job and run-scoped Actions artifact transport, not a signature.
   this run, verifies the receipt via `verifyActionExecution` (model, limits,
   session, single-execution trace), runs `validateActionReview`, persists
   `${runId}-completed` state, pushes fast-forward, then publishes the
-  `## Sentinel review` summary comment. The comment is sticky: `finalize`
+  `## Sentinel review` summary comment and, when a validated pass or
+  changes_required decision has findings, a formal PR review. The comment is
+  compact: the status, up to five reasons (a `+N more` line beyond that), a
+  one-line-per-finding list, and the run link; no finding explanation or
+  impact text. The review posts findings as inline comments anchored on
+  head-side diff lines where the cumulative diff permits and as file-level
+  comments otherwise, with `REQUEST_CHANGES` for changes_required and
+  `COMMENT` for pass; a 422 on line anchoring retries once with every
+  comment at file level. Reviews are per-run and never deduplicated; an
+  incomplete decision posts no review. The comment is sticky: `finalize`
   lists the PR's comments first, patches the first `github-actions[bot]`
   comment carrying the `<!-- sentinel-review -->` marker, and posts a new
   comment only when none exists, so each run updates one comment instead of

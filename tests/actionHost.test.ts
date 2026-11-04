@@ -6,11 +6,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { readActionControls, actionClaudeArgs } from '../src/actionControls.ts';
-import { runActionHost } from '../src/actionHost.ts';
+import { renderSummary, runActionHost } from '../src/actionHost.ts';
 import { validateActionRequest } from '../src/agentContracts.ts';
 import { isReport } from '../src/gate.ts';
 import type { HostDeps, HttpRequest, HttpResponse } from '../src/actionHost.ts';
-import type { Coverage, ReviewLedger, ReviewReport } from '../src/contracts.ts';
+import type { Coverage, Evidence, Finding, ReviewLedger, ReviewReport } from '../src/contracts.ts';
 import { loadTestPolicy, makeRepo, seedPolicyContext } from './helpers.ts';
 import type { RepoFixture } from './helpers.ts';
 import { SYSTEM_ROOT } from './helpers.ts';
@@ -32,12 +32,12 @@ interface Rig {
   eventPath: string;
 }
 
-function makeRig(): Rig {
+function makeRig(files: { base?: string; head?: string } = {}): Rig {
   const repo = makeRepo();
   seedPolicyContext(repo, loadTestPolicy());
-  repo.write('src/action.ts', 'export const required = true;\n');
+  repo.write('src/action.ts', files.base ?? 'export const required = true;\n');
   const baseSha = repo.commit('base');
-  repo.write('src/action.ts', 'export const required = false;\n');
+  repo.write('src/action.ts', files.head ?? 'export const required = false;\n');
   const headSha = repo.commit('head');
   const tmp = mkdtempSync(path.join(tmpdir(), 'srs-host-'));
   const stateDir = path.join(tmp, 'state');
@@ -349,8 +349,8 @@ interface DispatchOverrides {
   run?: Record<string, unknown>;
 }
 
-function makeDispatchRig(overrides: DispatchOverrides = {}): DispatchRig {
-  const rig = makeRig() as DispatchRig;
+function makeDispatchRig(overrides: DispatchOverrides = {}, files: { base?: string; head?: string } = {}): DispatchRig {
+  const rig = makeRig(files) as DispatchRig;
   rig.statuses = [];
   const { baseSha, headSha } = rig.source;
   const inputs: Record<string, unknown> = { pr_number: '17', ...(overrides.inputs ?? {}) };
@@ -597,10 +597,11 @@ test('finalize publishes literal markdown with untrusted values in code spans an
   assert.ok(post, 'no marker comment exists, so finalize must post one');
   const body = String((post.body as { body: string }).body);
   assert.match(body, /^## Sentinel review: changes_required\n/);
-  assert.doesNotMatch(body, /\\-/, 'no backslash-escaped markdown may remain');
+  assert.doesNotMatch(body, /\\/, 'no backslash-escaped markdown may remain');
+  assert.doesNotMatch(body, /—/, 'no em dash may appear in published text');
   assert.match(body, /\*\*Run:\*\* `gha-7-3` · \[workflow run\]\(https:\/\/github\.com\/devrev\/sentinel\/actions\/runs\/7\)/);
-  assert.match(body, /^### Open findings\n- `F-prior` \[blocker\] `Synthetic prior blocker claude b \[link\]\(https:\/\/example\.test\)` \(`src\/action\.ts`:1\)$/m);
-  assert.match(body, /^  `Synthetic unresolved finding\.` `Synthetic blocking-state fixture\.`$/m);
+  assert.match(body, /\*\*Findings:\*\* 1 blocker\n- `F-prior` \[blocker\] `Synthetic prior blocker claude b \[link\]\(https:\/\/example\.test\)` \(`src\/action\.ts`:1\)/);
+  assert.doesNotMatch(body, /Synthetic unresolved finding|blocking-state fixture/, 'compact summary omits explanation and impact prose');
   assert.doesNotMatch(body, /@claude|<b>/, 'mention and HTML characters are stripped from values');
   assert.match(body, /\n_Synthetic\/offline artifacts are never operational approvals\. This check is a required review gate, not a merge decision\._\n<!-- sentinel-review -->\n$/);
 });
@@ -731,6 +732,152 @@ test('manual controls read null caps absent flags; malformed or missing required
   assert.throws(() => readActionControls({ ...env, SENTINEL_REVIEW_MAX_TURNS: 'x' }, 17), /MAX_TURNS/);
   assert.throws(() => readActionControls({ ...env, SENTINEL_REVIEW_TIMEOUT_MINUTES: '' }, 17), /TIMEOUT/);
   assert.throws(() => readActionControls({ ...env, SENTINEL_REVIEW_MAX_FILES: '' }, 17), /MAX_FILES/);
+});
+
+const MULTI_LINE_FILES = {
+  base: 'const a = 1;\nconst b = 2;\nconst c = 3;\nconst d = 4;\nconst e = 5;\nconst f = 6;\nconst g = 7;\nconst h = 8;\nconst i = 9;\nconst j = 10;\n',
+  head: 'const a = 1;\nconst b = 2;\nconst c = 3;\nconst d = 4;\nconst e = 50;\nconst f = 6;\nconst g = 7;\nconst h = 8;\nconst i = 9;\nconst j = 10;\n',
+};
+
+function evidenceAt(revision: 'base' | 'head', startLine: number, quote: string): Evidence {
+  return { path: 'src/action.ts', revision, startLine, endLine: startLine, quote };
+}
+
+function finding(id: string, severity: Finding['severity'], introducedBy: Evidence): Finding {
+  return {
+    id,
+    ruleId: severity === 'question' ? 'novel' : 'SR-002',
+    severity,
+    title: `${id} synthetic title @claude`,
+    explanation: `${id} synthetic explanation.`,
+    impact: `${id} synthetic impact.`,
+    introducedBy,
+    evidence: [introducedBy],
+    counterEvidence: [],
+  };
+}
+
+function reviewPosts(rig: DispatchRig): HttpRequest[] {
+  return rig.posts.filter((post: HttpRequest): boolean => post.path.endsWith('/reviews'));
+}
+
+test('renderSummary caps reasons, lists findings one line each, and keeps the marker', (): void => {
+  const decision = {
+    status: 'incomplete' as const,
+    reasons: ['r1', 'r2', 'r3', 'r4', 'r5', 'r6', 'r7'],
+    ledger: { schemaVersion: 1 as const, repository: REPO, pullRequest: 17, lastHeadSha: null, openFindings: [] },
+  };
+  const body = renderSummary(decision, 'gha-7-3', 'https://github.com/devrev/sentinel/actions/runs/7');
+  const bullets = body.split('\n').filter((line: string): boolean => line.startsWith('- '));
+  assert.equal(bullets.length, 6);
+  assert.match(bullets[5], /^- \+2 more, see workflow run$/);
+  assert.doesNotMatch(body, /—|\\/, 'no em dash or backslash escapes');
+  assert.doesNotMatch(body, /\*\*Findings:\*\*/, 'incomplete decisions publish no findings section');
+  assert.match(body, /<!-- sentinel-review -->\n$/);
+
+  const findings: Finding[] = [
+    finding('F-one', 'blocker', evidenceAt('head', 5, 'const e = 50;')),
+    finding('F-two', 'question', evidenceAt('base', 5, 'const e = 5;')),
+    finding('F-three', 'advisory', evidenceAt('head', 10, 'const j = 10;')),
+  ];
+  const blocked = renderSummary(
+    { status: 'changes_required', reasons: ['F-one: title'], ledger: { ...decision.ledger, openFindings: findings } },
+    'gha-7-3',
+    'https://github.com/devrev/sentinel/actions/runs/7',
+  );
+  assert.match(blocked, /\*\*Findings:\*\* 1 blocker, 1 advisory, 1 question\n- `F-one` \[blocker\] `F-one synthetic title claude` \(`src\/action\.ts`:5\)\n- `F-two` \[question\] `F-two synthetic title claude` \(`src\/action\.ts`:5\)\n- `F-three` \[advisory\] `F-three synthetic title claude` \(`src\/action\.ts`:10\)/);
+  assert.doesNotMatch(blocked, /synthetic explanation|synthetic impact/, 'no explanation or impact prose');
+});
+
+test('finalize posts a formal review with inline and file-level comments after the summary', async (): Promise<void> => {
+  const rig = makeDispatchRig({}, MULTI_LINE_FILES);
+  assert.equal(await runActionHost('reserve', { ...dispatchOptions(rig), out: rig.preparedDir }, rig.deps), 0);
+  const report = reportFor(rig);
+  report.findings = [
+    finding('F-inline', 'blocker', evidenceAt('head', 5, 'const e = 50;')),
+    finding('F-context', 'question', evidenceAt('head', 10, 'const j = 10;')),
+    finding('F-base', 'advisory', evidenceAt('base', 5, 'const e = 5;')),
+  ];
+  writeResult(rig, report);
+  const finOut = path.join(mkdtempSync(path.join(tmpdir(), 'finr-')), 'out');
+  assert.equal(await runActionHost('finalize', { ...dispatchOptions(rig), prepared: rig.preparedDir, result: rig.resultDir, out: finOut }, rig.deps), 2);
+  assert.equal(rig.posts[0].path, '/repos/devrev/sentinel/issues/17/comments', 'summary posts before the review');
+  const review = rig.posts.find((post: HttpRequest): boolean => post.path === '/repos/devrev/sentinel/pulls/17/reviews');
+  assert.ok(review, 'changes_required with findings must post a PR review');
+  const body = review.body as { commit_id: string; event: string; body: string; comments: Record<string, unknown>[] };
+  assert.equal(body.commit_id, rig.source.headSha);
+  assert.equal(body.event, 'REQUEST_CHANGES');
+  assert.equal(body.body, 'Sentinel review: changes_required. Findings inline; summary in the sentinel-review comment.');
+  assert.equal(body.comments.length, 3);
+  assert.deepEqual(body.comments[0], {
+    path: 'src/action.ts', line: 5, side: 'RIGHT',
+    body: '**[blocker] `F-inline`: F-inline synthetic title claude**\n\nF-inline synthetic explanation.\n\n**Impact:** F-inline synthetic impact.',
+  });
+  assert.equal(body.comments[1].subject_type, 'file', 'head line outside the diff hunks degrades to file level');
+  assert.equal(body.comments[2].subject_type, 'file', 'base-revision findings are file level');
+  for (const comment of body.comments) assert.doesNotMatch(String(comment.body), /@claude|—|\\|`{2}/);
+  // A clean pass posts COMMENT, never REQUEST_CHANGES.
+  const clean = makeDispatchRig({}, MULTI_LINE_FILES);
+  assert.equal(await runActionHost('reserve', { ...dispatchOptions(clean), out: clean.preparedDir }, clean.deps), 0);
+  const passReport = reportFor(clean);
+  passReport.findings = [finding('F-note', 'advisory', evidenceAt('head', 5, 'const e = 50;'))];
+  writeResult(clean, passReport);
+  assert.equal(await runActionHost('finalize', { ...dispatchOptions(clean), prepared: clean.preparedDir, result: clean.resultDir, out: path.join(mkdtempSync(path.join(tmpdir(), 'finp-')), 'out') }, clean.deps), 0);
+  const passReview = reviewPosts(clean)[0];
+  assert.equal((passReview.body as { event: string }).event, 'COMMENT');
+});
+
+test('finalize skips the review on incomplete, retries file-level on 422, and fails closed otherwise', async (): Promise<void> => {
+  // Incomplete: no validated report means no review post at all.
+  {
+    const rig = makeDispatchRig({}, MULTI_LINE_FILES);
+    assert.equal(await runActionHost('reserve', { ...dispatchOptions(rig), out: rig.preparedDir }, rig.deps), 0);
+    const outcome = await runActionHost('finalize', { ...dispatchOptions(rig), prepared: rig.preparedDir, result: path.join(mkdtempSync(path.join(tmpdir(), 'abs-')), 'no'), out: path.join(mkdtempSync(path.join(tmpdir(), 'fink-')), 'out') }, rig.deps);
+    assert.equal(outcome, 3);
+    assert.equal(reviewPosts(rig).length, 0, 'unvalidated findings must not publish');
+  }
+  // 422: retry once with every comment at file level.
+  {
+    const rig = makeDispatchRig({}, MULTI_LINE_FILES);
+    assert.equal(await runActionHost('reserve', { ...dispatchOptions(rig), out: rig.preparedDir }, rig.deps), 0);
+    const report = reportFor(rig);
+    report.findings = [finding('F-inline', 'blocker', evidenceAt('head', 5, 'const e = 50;'))];
+    writeResult(rig, report);
+    const reviewCalls: HttpRequest[] = [];
+    const inner = rig.deps.http;
+    rig.deps.http = (request: HttpRequest): HttpResponse => {
+      if (request.method === 'POST' && request.path.endsWith('/reviews')) {
+        reviewCalls.push(request);
+        return reviewCalls.length === 1 ? { status: 422, json: {} } : { status: 201, json: { id: 9 } };
+      }
+      return inner(request) as HttpResponse;
+    };
+    assert.equal(await runActionHost('finalize', { ...dispatchOptions(rig), prepared: rig.preparedDir, result: rig.resultDir, out: path.join(mkdtempSync(path.join(tmpdir(), 'finq-')), 'out') }, rig.deps), 2);
+    assert.equal(reviewCalls.length, 2);
+    const retryComments = (reviewCalls[1].body as { comments: Record<string, unknown>[] }).comments;
+    assert.equal(retryComments.length, 1);
+    assert.equal(retryComments[0].subject_type, 'file');
+    assert.equal('line' in retryComments[0], false);
+    assert.match(readFileSync(rig.env.GITHUB_OUTPUT as string, 'utf8'), /canonical_decision/);
+  }
+  // Any other non-2xx fails the stage with no decision output.
+  {
+    const rig = makeDispatchRig({}, MULTI_LINE_FILES);
+    assert.equal(await runActionHost('reserve', { ...dispatchOptions(rig), out: rig.preparedDir }, rig.deps), 0);
+    const report = reportFor(rig);
+    report.findings = [finding('F-inline', 'blocker', evidenceAt('head', 5, 'const e = 50;'))];
+    writeResult(rig, report);
+    const inner = rig.deps.http;
+    rig.deps.http = (request: HttpRequest): HttpResponse => {
+      if (request.method === 'POST' && request.path.endsWith('/reviews')) return { status: 500, json: {} };
+      return inner(request) as HttpResponse;
+    };
+    const outcome = await runActionHost('finalize', { ...dispatchOptions(rig), prepared: rig.preparedDir, result: rig.resultDir, out: path.join(mkdtempSync(path.join(tmpdir(), 'fins-')), 'out') }, rig.deps).then((code) => `code-${code}`, (error: Error) => `err:${error.message}`);
+    assert.match(outcome, /review publication failed with status 500/, outcome);
+    const output = existsSync(rig.env.GITHUB_OUTPUT as string) ? readFileSync(rig.env.GITHUB_OUTPUT as string, 'utf8') : '';
+    assert.equal(output.includes('canonical_decision'), false);
+    assert.equal(rig.statuses.every((status) => status.state !== 'success' && status.state !== 'failure'), true);
+  }
 });
 
 test('a legacy four-input dispatch still validates SHAs against the live PR', async (): Promise<void> => {
