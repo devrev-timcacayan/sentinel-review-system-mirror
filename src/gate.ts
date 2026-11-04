@@ -144,8 +144,11 @@ function evidenceExists(snapshot: ReviewEvaluationContext, evidence: Evidence): 
   const source = snapshot.files.find((file): boolean => file.path === evidence.path && file.revision === evidence.revision);
   if (!source) return false;
   const lines = source.content.split('\n');
+  // Quotes must match source content exactly, but leading indentation varies
+  // when a model copies code; compare content after stripping it, not bytes.
+  const quoted = evidence.quote.split('\n').map((line: string): string => line.trimStart()).join('\n');
   return evidence.endLine <= lines.length
-    && lines.slice(evidence.startLine - 1, evidence.endLine).join('\n') === evidence.quote;
+    && lines.slice(evidence.startLine - 1, evidence.endLine).map((line: string): string => line.trimStart()).join('\n') === quoted;
 }
 
 function duplicateValues(values: string[]): string[] {

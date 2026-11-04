@@ -198,6 +198,18 @@ test('finding evidence must match captured lines and revision exactly', (): void
   }
 });
 
+test('finding evidence tolerates dropped leading whitespace but rejects content drift', (): void => {
+  const { snapshot, report, previous } = fixture();
+  report.findings = [blocker()];
+  // Model-copied code commonly loses leading indentation; content still must match.
+  report.findings[0].evidence[0] = { path: 'src/action.ts', revision: 'head', startLine: 1, endLine: 1, quote: 'export const required = false;' };
+  assert.notEqual(evaluateReview(snapshot, report, previous, POLICY).status, 'incomplete');
+  const { snapshot: s2, report: r2, previous: p2 } = fixture();
+  r2.findings = [blocker()];
+  r2.findings[0].evidence[0].quote = 'export const required = true;';
+  assert.equal(evaluateReview(s2, r2, p2, POLICY).status, 'incomplete');
+});
+
 test('unrelated pre-existing context does not establish a PR blocker', (): void => {
   const { snapshot, report, previous } = fixture();
   report.findings = [{ ...blocker(), introducedBy: evidence('tests/consumer.ts') }];
