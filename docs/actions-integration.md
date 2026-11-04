@@ -98,10 +98,25 @@ because the offline CLI, docs, and tests still reference them.
 
 ## Workflow files
 
-`integration/sentinel-claude-code-review.yml` is the canonical three-job
-template (prepare/check/finalize split of contents:write, contents:read +
-id-token, contents:write). `integration/retired-sentinel-review.yml` retires
-the old experiment. Staging copies at
-`/private/tmp/sentinel-staging/.github/workflows/{claude-code-review,
+`integration/sentinel-claude-code-review.yml` is the canonical template with
+three review jobs (prepare/check/finalize split of contents:write,
+contents:read + id-token, contents:write) plus an isolated dispatch probe.
+`integration/retired-sentinel-review.yml` retires the old experiment. Staging
+copies at `/private/tmp/sentinel-staging/.github/workflows/{claude-code-review,
 sentinel-review}.yml` are byte-identical mirrors; originals preserved under
 `.artifacts/action-integration-verify/staging-originals/`.
+
+GitHub's `pull_request_target` semantics are confirmed to run the
+default-branch copy of a workflow, so these staging-only edits are not
+automatic PR activation. A `workflow_dispatch` trigger is present only to
+prove that a manually dispatched run can select the staging ref at all; no
+live dispatch has been run or proven. On dispatch, only the
+`staging-dispatch-probe` job is eligible (`if: github.event_name ==
+'workflow_dispatch'`): one bash step with empty permissions, no checkout, no
+actions dependencies, no secrets, token grants, OIDC, model calls, state
+updates, or publishing. All review jobs are gated to
+`pull_request_target`, and the final job keeps `always()` inside that event
+so it still runs on prepare/investigate failure but can never finalize on
+dispatch. There is no CircleCI bridge and no dispatch-based review support;
+dispatch is branch-selection feasibility only, and any cloud result remains
+unverified.

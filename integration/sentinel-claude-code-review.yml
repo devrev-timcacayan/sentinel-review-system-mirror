@@ -1,15 +1,16 @@
 name: Claude Code Review
 
-# Staging POC only. This runs trusted base-branch workflow code, never PR scripts.
+# Staging POC only. Manual dispatch runs an isolated no-model probe.
 on:
   pull_request_target:
     branches: [staging]
     types: [opened, reopened, synchronize, ready_for_review]
+  workflow_dispatch:
 
 permissions: {}
 
 concurrency:
-  group: sentinel-canonical-review-${{ github.event.pull_request.number }}
+  group: sentinel-canonical-review-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 env:
@@ -24,7 +25,24 @@ env:
   SENTINEL_REVIEW_MAX_READ_BYTES: ${{ vars.SENTINEL_REVIEW_MAX_READ_BYTES }}
 
 jobs:
+  staging-dispatch-probe:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    permissions: {}
+    steps:
+      - name: Verify the dispatched staging workflow ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'event=%s\nref=%s\nsha=%s\nworkflow_ref=%s\n' "$GITHUB_EVENT_NAME" "$GITHUB_REF" "$GITHUB_SHA" "$GITHUB_WORKFLOW_REF"
+          test "$GITHUB_EVENT_NAME" = 'workflow_dispatch'
+          test "$GITHUB_REPOSITORY" = 'devrev/sentinel'
+          test "$GITHUB_REF" = 'refs/heads/staging'
+          test "$GITHUB_WORKFLOW_REF" = 'devrev/sentinel/.github/workflows/claude-code-review.yml@refs/heads/staging'
+
   prepare:
+    if: ${{ github.event_name == 'pull_request_target' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -89,7 +107,7 @@ jobs:
           if-no-files-found: error
 
   investigate:
-    if: ${{ needs.prepare.result == 'success' }}
+    if: ${{ github.event_name == 'pull_request_target' && needs.prepare.result == 'success' }}
     needs: prepare
     runs-on: ubuntu-latest
     # The fallback is only for a skipped job after failed preparation, never a run limit.
@@ -195,7 +213,7 @@ jobs:
           if-no-files-found: error
 
   claude-auto-review:
-    if: ${{ always() }}
+    if: ${{ always() && github.event_name == 'pull_request_target' }}
     needs: [prepare, investigate]
     runs-on: ubuntu-latest
     permissions:
