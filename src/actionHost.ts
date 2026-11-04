@@ -24,7 +24,7 @@ const WORKFLOW_PATH = '.github/workflows/claude-code-review.yml';
 const API_ROOT = 'https://api.github.com';
 
 export interface HttpRequest {
-  method: 'GET' | 'POST';
+  method: 'GET' | 'POST' | 'PATCH';
   path: string;
   body?: unknown;
 }
@@ -548,28 +548,44 @@ async function stageCapture(deps: HostDeps, options: Record<string, string>): Pr
   return 0;
 }
 
-function sanitizeComment(text: string): string {
-  return text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('@', '&#64;').replace(/([\\`*_{}[\]()#+.!|~-])/g, '\\$1').replace(/\r?\n/g, ' ');
+const COMMENT_MARKER = '<!-- sentinel-review -->';
+const COMMENT_AUTHOR = 'github-actions[bot]';
+const UNTRUSTED_FIELD_LIMIT = 500;
+
+// Model-authored fields are data, not markup: they are flattened to one line
+// and stripped of the characters that could mention users, inject HTML, or
+// break out of the code span each value is rendered inside.
+function sanitizeValue(text: string): string {
+  const clean = text.replace(/\r?\n/g, ' ').replace(/[\\`@<>]/g, '');
+  return clean.length > UNTRUSTED_FIELD_LIMIT ? `${clean.slice(0, UNTRUSTED_FIELD_LIMIT)}...` : clean;
 }
 
-function renderSummary(decision: GateDecision, runId: string): string {
+function codeSpan(text: string): string {
+  return `\`${sanitizeValue(text)}\``;
+}
+
+// Trusted template text stays literal Markdown; only model-authored values are
+// sanitized and code-spanned so the summary renders readably.
+function renderSummary(decision: GateDecision, runId: string, runUrl: string): string {
   const lines = [
-    `Sentinel static review (${sanitizeComment(runId)}): ${decision.status}`,
+    `## Sentinel review: ${decision.status}`,
     '',
-    ...decision.reasons.map((reason: string): string => `- ${sanitizeComment(reason)}`),
+    ...decision.reasons.map((reason: string): string => `- ${codeSpan(reason)}`),
+    '',
+    `**Run:** ${codeSpan(runId)} · [workflow run](${runUrl})`,
   ];
   if (decision.ledger.openFindings.length > 0) {
-    lines.push('', 'Open findings:');
+    lines.push('', '### Open findings');
     for (const finding of decision.ledger.openFindings) {
-      lines.push(`- ${sanitizeComment(`${finding.id} [${finding.severity}] ${finding.title} (${finding.introducedBy.path}:${String(finding.introducedBy.startLine)})`)}`);
-      lines.push(`  ${sanitizeComment(`${finding.explanation} ${finding.impact}`)}`);
+      lines.push(`- ${codeSpan(finding.id)} [${finding.severity}] ${codeSpan(finding.title)} (${codeSpan(finding.introducedBy.path)}:${String(finding.introducedBy.startLine)})`);
+      lines.push(`  ${codeSpan(finding.explanation)} ${codeSpan(finding.impact)}`);
     }
   }
-  lines.push('', 'Synthetic/offline artifacts are never operational approvals. This check is a required review gate, not a merge decision.');
+  lines.push('', '_Synthetic/offline artifacts are never operational approvals. This check is a required review gate, not a merge decision._', COMMENT_MARKER);
   return `${lines.join('\n')}\n`;
 }
 
-const STATUS_CONTEXT = 'sentinel-canonical-review';
+const STATUS_CONTEXT = 'sentinel-review';
 
 async function postCommitStatus(deps: HostDeps, headSha: string, state: 'pending' | 'success' | 'failure' | 'error', description: string): Promise<void> {
   const response = await deps.http({
@@ -602,14 +618,14 @@ async function verifyStatusAuthorization(deps: HostDeps, options: Record<string,
 
 async function stageStartStatus(deps: HostDeps, options: Record<string, string>): Promise<number> {
   const ctx = await verifyStatusAuthorization(deps, options);
-  await postCommitStatus(deps, ctx.headSha, 'pending', 'Sentinel canonical review is pending on this exact head.');
+  await postCommitStatus(deps, ctx.headSha, 'pending', 'Sentinel review is pending on this exact head.');
   console.log(JSON.stringify({ status: 'pending', headSha: ctx.headSha }));
   return 0;
 }
 
 async function stageFailStatus(deps: HostDeps, options: Record<string, string>): Promise<number> {
   const ctx = await verifyStatusAuthorization(deps, options);
-  await postCommitStatus(deps, ctx.headSha, 'error', 'Sentinel canonical review could not complete on this head.');
+  await postCommitStatus(deps, ctx.headSha, 'error', 'Sentinel review could not complete on this head.');
   console.log(JSON.stringify({ status: 'error', headSha: ctx.headSha }));
   return 0;
 }
@@ -734,14 +750,37 @@ async function stageFinalize(deps: HostDeps, options: Record<string, string>): P
       token: deps.env.GH_TOKEN ?? '',
     });
   }
-  const publish = await deps.http({
-    method: 'POST',
-    path: `/repos/${REPOSITORY}/issues/${String(ctx.pullRequest)}/comments`,
-    body: { body: renderSummary(decision, ctx.runId) },
+  const commentBody = renderSummary(decision, ctx.runId, `https://github.com/devrev/sentinel/actions/runs/${deps.env.GITHUB_RUN_ID}`);
+  const comments = await deps.http({
+    method: 'GET',
+    path: `/repos/${REPOSITORY}/issues/${String(ctx.pullRequest)}/comments?per_page=100`,
   });
+  require(comments.status === 200, `comment lookup failed with status ${comments.status}`);
+  // A marker alone proves nothing: only a marker comment authored by this
+  // workflow's token is eligible for update, so injected copies can neither be
+  // hijacked nor stall publication.
+  let existingId: number | null = null;
+  for (const comment of Array.isArray(comments.json) ? comments.json : []) {
+    if (!object(comment) || typeof comment.id !== 'number' || !Number.isSafeInteger(comment.id)) continue;
+    if (typeof comment.body !== 'string' || !comment.body.includes(COMMENT_MARKER)) continue;
+    if (!object(comment.user) || comment.user.login !== COMMENT_AUTHOR) continue;
+    existingId = comment.id;
+    break;
+  }
+  const publish = existingId === null
+    ? await deps.http({
+      method: 'POST',
+      path: `/repos/${REPOSITORY}/issues/${String(ctx.pullRequest)}/comments`,
+      body: { body: commentBody },
+    })
+    : await deps.http({
+      method: 'PATCH',
+      path: `/repos/${REPOSITORY}/issues/comments/${String(existingId)}`,
+      body: { body: commentBody },
+    });
   require(publish.status >= 200 && publish.status < 300, `comment publication failed with status ${publish.status}`);
   const statusState = decision.status === 'pass' ? 'success' : decision.status === 'changes_required' ? 'failure' : 'error';
-  await postCommitStatus(deps, ctx.headSha, statusState, `Sentinel canonical review: ${decision.status}.`);
+  await postCommitStatus(deps, ctx.headSha, statusState, `Sentinel review: ${decision.status}.`);
   githubOutput(deps, { canonical_decision: decision.status });
   console.log(JSON.stringify({ status: decision.status }));
   if (decision.status === 'pass') return 0;

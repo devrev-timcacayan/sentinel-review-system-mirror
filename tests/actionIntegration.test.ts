@@ -340,8 +340,10 @@ test('manual dispatch workflow exposes one PR input and the canonical guards', (
   assert.match(finalJob, /if: \$\{\{ always\(\) && github\.event_name == 'workflow_dispatch' \}\}/);
   assert.match(prepareJob, /statuses: write/);
   assert.match(finalJob, /statuses: write/);
-  assert.doesNotMatch(investigateJob.split('permissions:')[1].split('steps:')[0], /statuses: write|contents: write|pull-requests: write/);
-  assert.match(template, /sentinel-canonical-review-\$\{\{ inputs\.pr_number \|\| github\.run_id \}\}/);
+  assert.match(finalJob.split('permissions:')[1].split('steps:')[0], /issues: write/);
+  assert.doesNotMatch(prepareJob.split('permissions:')[1].split('outputs:')[0], /issues: write/);
+  assert.doesNotMatch(investigateJob.split('permissions:')[1].split('steps:')[0], /statuses: write|contents: write|pull-requests: write|issues: write/);
+  assert.match(template, /sentinel-review-\$\{\{ inputs\.pr_number \|\| github\.run_id \}\}/);
   const startIdx = prepareJob.indexOf('action-host start-status');
   const stateIdx = prepareJob.indexOf('Checkout existing operational state branch');
   assert.ok(startIdx > -1 && stateIdx > -1 && startIdx < stateIdx, 'pending status before state checkout');

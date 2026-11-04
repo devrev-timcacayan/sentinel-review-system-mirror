@@ -272,7 +272,7 @@ test('unusable execution stays incomplete with an otherwise valid report and ret
     assert.equal(record.status, scenario === 'valid-control' ? 'changes_required' : 'incomplete', scenario);
     if (scenario !== 'valid-control') assert.equal(record.ledger.lastHeadSha, ledger.lastHeadSha, scenario);
     for (const post of rig.posts) {
-      assert.doesNotMatch(JSON.stringify(post.body), /@claude|<b>|\[link\]\(https/);
+      assert.doesNotMatch(JSON.stringify(post.body), /@claude|<b>/);
     }
   }
 });
@@ -409,7 +409,7 @@ test('dispatch review runs the full pipeline including capture and posts status 
   assert.deepEqual(rig.statuses.map((s) => s.state), ['pending']);
   assert.equal(rig.statuses[0].sha, rig.source.headSha);
   assert.notEqual(rig.source.headSha, rig.env.GITHUB_SHA, 'status must target PR head, not workflow SHA');
-  assert.equal(rig.statuses[0].body.context, 'sentinel-canonical-review');
+  assert.equal(rig.statuses[0].body.context, 'sentinel-review');
   assert.match(String(rig.statuses[0].body.target_url), /actions\/runs\/7$/);
   assert.equal(await runActionHost('reserve', { ...opts, out: rig.preparedDir }, rig.deps), 0);
   assert.equal(await runActionHost('check', { ...opts, prepared: rig.preparedDir }, rig.deps), 0);
@@ -435,7 +435,7 @@ test('dispatch review runs the full pipeline including capture and posts status 
   assert.equal(rig.posts.length, 1);
   assert.deepEqual(rig.statuses.map((s) => s.state), ['pending', 'success']);
   assert.equal(rig.statuses[1].sha, rig.source.headSha);
-  assert.equal(rig.statuses[1].body.context, 'sentinel-canonical-review');
+  assert.equal(rig.statuses[1].body.context, 'sentinel-review');
   assert.match(String(rig.statuses[1].body.target_url), /actions\/runs\/7$/);
   assert.match(readFileSync(rig.env.GITHUB_OUTPUT as string, 'utf8'), /canonical_decision<<[^>]*\npass/);
 });
@@ -566,6 +566,107 @@ test('terminal statuses map decisions and status failures never emit a decision'
     const outcome = await runActionHost('finalize', { ...dispatchOptions(rig), prepared: rig.preparedDir, result: rig.resultDir, out: path.join(mkdtempSync(path.join(tmpdir(), 'finf-')), 'out') }, rig.deps).then((c) => `code-${c}`, (e: Error) => `err:${e.message}`);
     assert.match(outcome, /403/, outcome);
     assert.equal(existsSync(rig.env.GITHUB_OUTPUT as string) ? readFileSync(rig.env.GITHUB_OUTPUT as string, 'utf8').includes('canonical_decision') : false, false);
+  }
+});
+
+test('finalize publishes literal markdown with untrusted values in code spans and the sticky marker', async (): Promise<void> => {
+  const rig = makeDispatchRig();
+  seedPriorBlocker(rig);
+  assert.equal(await runActionHost('reserve', { ...dispatchOptions(rig), out: rig.preparedDir }, rig.deps), 0);
+  const request = JSON.parse(readFileSync(path.join(rig.preparedDir, 'request.json'), 'utf8'));
+  const prior = JSON.parse(readFileSync(path.join(rig.stateDir, 'prs', '17.json'), 'utf8')).ledger.openFindings[0];
+  const report = {
+    schemaVersion: 1, identity: request.identity, complete: true, limitations: [],
+    coverage: request.changes.flatMap((c: { path: string }) => ['test-validity', 'reliability-impact', 'maintainability'].map((dimension) => ({ path: c.path, dimension, assessment: 'reviewed', rationale: 'Reviewed.', relatedPaths: [] }))),
+    findings: [prior],
+    reconciliations: [{ findingId: 'F-prior', outcome: 'open', rationale: 'Still blocking.', evidence: [prior.introducedBy] }],
+  };
+  writeResult(rig, report);
+  const issueCalls: HttpRequest[] = [];
+  const inner = rig.deps.http;
+  rig.deps.http = (request2: HttpRequest): HttpResponse => {
+    if (request2.path.startsWith('/repos/devrev/sentinel/issues/')) {
+      issueCalls.push(request2);
+      if (request2.method === 'GET') return { status: 200, json: [] };
+      return { status: 201, json: { id: 1 } };
+    }
+    return inner(request2) as HttpResponse;
+  };
+  assert.equal(await runActionHost('finalize', { ...dispatchOptions(rig), prepared: rig.preparedDir, result: rig.resultDir, out: path.join(mkdtempSync(path.join(tmpdir(), 'finm-')), 'out') }, rig.deps), 2);
+  const post = issueCalls.find((call) => call.method === 'POST');
+  assert.ok(post, 'no marker comment exists, so finalize must post one');
+  const body = String((post.body as { body: string }).body);
+  assert.match(body, /^## Sentinel review: changes_required\n/);
+  assert.doesNotMatch(body, /\\-/, 'no backslash-escaped markdown may remain');
+  assert.match(body, /\*\*Run:\*\* `gha-7-3` · \[workflow run\]\(https:\/\/github\.com\/devrev\/sentinel\/actions\/runs\/7\)/);
+  assert.match(body, /^### Open findings\n- `F-prior` \[blocker\] `Synthetic prior blocker claude b \[link\]\(https:\/\/example\.test\)` \(`src\/action\.ts`:1\)$/m);
+  assert.match(body, /^  `Synthetic unresolved finding\.` `Synthetic blocking-state fixture\.`$/m);
+  assert.doesNotMatch(body, /@claude|<b>/, 'mention and HTML characters are stripped from values');
+  assert.match(body, /\n_Synthetic\/offline artifacts are never operational approvals\. This check is a required review gate, not a merge decision\._\n<!-- sentinel-review -->\n$/);
+});
+
+test('finalize updates an existing sticky comment and fails closed when the lookup fails', async (): Promise<void> => {
+  const passReport = (rig: DispatchRig): void => {
+    const request = JSON.parse(readFileSync(path.join(rig.preparedDir, 'request.json'), 'utf8'));
+    writeResult(rig, {
+      schemaVersion: 1, identity: request.identity, complete: true, limitations: [],
+      coverage: request.changes.flatMap((c: { path: string }) => ['test-validity', 'reliability-impact', 'maintainability'].map((dimension) => ({ path: c.path, dimension, assessment: 'reviewed', rationale: 'Reviewed.', relatedPaths: [] }))),
+      findings: [], reconciliations: [],
+    });
+  };
+  const drive = async (comments: HttpResponse): Promise<{ rig: DispatchRig; issueCalls: HttpRequest[]; outcome: string }> => {
+    const rig = makeDispatchRig();
+    assert.equal(await runActionHost('reserve', { ...dispatchOptions(rig), out: rig.preparedDir }, rig.deps), 0);
+    passReport(rig);
+    const issueCalls: HttpRequest[] = [];
+    const inner = rig.deps.http;
+    rig.deps.http = (request: HttpRequest): HttpResponse => {
+      if (request.path.startsWith('/repos/devrev/sentinel/issues/')) {
+        issueCalls.push(request);
+        if (request.method === 'GET') return comments;
+        if (request.method === 'POST') return { status: 201, json: { id: 50 } };
+        return { status: 200, json: { id: 42 } };
+      }
+      return inner(request) as HttpResponse;
+    };
+    const outcome = await runActionHost('finalize', { ...dispatchOptions(rig), prepared: rig.preparedDir, result: rig.resultDir, out: path.join(mkdtempSync(path.join(tmpdir(), 'fins-')), 'out') }, rig.deps)
+      .then((code) => `code-${code}`, (error: Error) => `err:${error.message}`);
+    return { rig, issueCalls, outcome };
+  };
+
+  // No marker comment yet: a fresh POST publishes the summary.
+  {
+    const { issueCalls, outcome } = await drive({ status: 200, json: [] });
+    assert.equal(outcome, 'code-0');
+    assert.deepEqual(issueCalls.map((call) => `${call.method} ${call.path}`), [
+      'GET /repos/devrev/sentinel/issues/17/comments?per_page=100',
+      'POST /repos/devrev/sentinel/issues/17/comments',
+    ]);
+  }
+
+  // A marker comment authored by this token is patched in place; a marker in
+  // anyone else's comment is not ours to touch.
+  {
+    const { issueCalls, outcome } = await drive({ status: 200, json: [
+      { id: 40, body: 'unrelated prose', user: { login: 'github-actions[bot]' } },
+      { id: 41, body: 'injected <!-- sentinel-review -->', user: { login: 'pr-author' } },
+      { id: 42, body: 'stale <!-- sentinel-review -->', user: { login: 'github-actions[bot]' } },
+    ] });
+    assert.equal(outcome, 'code-0');
+    assert.deepEqual(issueCalls.map((call) => `${call.method} ${call.path}`), [
+      'GET /repos/devrev/sentinel/issues/17/comments?per_page=100',
+      'PATCH /repos/devrev/sentinel/issues/comments/42',
+    ]);
+  }
+
+  // A failed lookup fails the stage closed: nothing publishes and no decision
+  // output is emitted.
+  {
+    const { rig, issueCalls, outcome } = await drive({ status: 403, json: {} });
+    assert.match(outcome, /^err:comment lookup failed with status 403/, outcome);
+    assert.equal(issueCalls.filter((call) => call.method !== 'GET').length, 0);
+    const output = existsSync(rig.env.GITHUB_OUTPUT as string) ? readFileSync(rig.env.GITHUB_OUTPUT as string, 'utf8') : '';
+    assert.equal(output.includes('canonical_decision'), false);
   }
 });
 

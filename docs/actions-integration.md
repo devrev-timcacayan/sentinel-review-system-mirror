@@ -30,7 +30,7 @@ run:
 - `sentinel-review-state` was initialized on `devrev/sentinel` with an empty
   index at commit `978f6f58c3ad4befd4fbbc2613ab37b0f0d5cfca`. The runtime
   still fails closed on missing or corrupt state and never auto-initializes.
-- The `sentinel-canonical-review` status context must be configured on staging
+- The `sentinel-review` status context must be configured on staging
   before treating it as a mandatory merge check; this work does not configure
   branch protection or required checks and a dispatch success is not PR
   approval.
@@ -56,10 +56,11 @@ event payload (staging base, same-repo head, full 40-hex SHAs, `POC Test:
 <desc>-DO NOT REVIEW` title), derives runId `gha-<run>-<attempt>`, and enforces
 the reviewer pin. GitHub API calls are limited to:
 `GET /repos/devrev/sentinel/pulls/N`, `GET
-/repos/devrev/sentinel/actions/runs/RUN`, and `POST` to
-`/repos/devrev/sentinel/issues/N/comments` (sanitized summary: mentions, HTML,
-and Markdown neutralized) and `/repos/devrev/sentinel/statuses/<headSha>`
-(fixed `sentinel-canonical-review` context: `start-status` pending,
+/repos/devrev/sentinel/actions/runs/RUN`, `GET` and `POST` on
+`/repos/devrev/sentinel/issues/N/comments`, `PATCH` on
+`/repos/devrev/sentinel/issues/comments/<id>`, and `POST` to
+`/repos/devrev/sentinel/statuses/<headSha>`
+(fixed `sentinel-review` context: `start-status` pending,
 `fail-status` error, `finalize` terminal decision). `start-status` and
 `fail-status` deliberately do not require paid-control limits so a pending or
 error status can be recorded even when preparation cannot start; they still
@@ -94,7 +95,16 @@ preparation job and run-scoped Actions artifact transport, not a signature.
   this run, verifies the receipt via `verifyActionExecution` (model, limits,
   session, single-execution trace), runs `validateActionReview`, persists
   `${runId}-completed` state, pushes fast-forward, then publishes the
-  sanitized comment. Exit 0/2/3/1. Only a pending reservation token matching
+  `## Sentinel review` summary comment. The comment is sticky: `finalize`
+  lists the PR's comments first, patches the first `github-actions[bot]`
+  comment carrying the `<!-- sentinel-review -->` marker, and posts a new
+  comment only when none exists, so each run updates one comment instead of
+  piling on. The comment is authored by `github-actions[bot]` because
+  `GH_TOKEN` is the job's `GITHUB_TOKEN`; renaming the bot itself would
+  require a GitHub App. Untrusted report fields are capped, flattened to one
+  line, stripped of mention, HTML, and code-span characters, and rendered
+  inside Markdown code spans while the trusted template stays literal
+  Markdown. Exit 0/2/3/1. Only a pending reservation token matching
   this exact run is eligible; a completed or stale token fails closed with no
   publish or write. Publication failure after a pushed decision fails the job
   while retaining the ledger; a later operator-approved rerun is a separate,
@@ -142,7 +152,7 @@ all three review jobs skipped and activation vars empty; that proves branch
 selection only and is not paid-runtime verification. On dispatch the review
 path validates inputs, live PR identity, run binding, approved-PR env, pin,
 and controls before any state or model step, and publishes a fixed
-`sentinel-canonical-review` commit status on the exact PR head (pending via
+`sentinel-review` commit status on the exact PR head (pending via
 `start-status`, terminal via `finalize`, error fallback via `fail-status`);
 that status context must be configured on staging before anyone treats it as
 mandatory, and a successful dispatch is not PR approval. All review jobs are

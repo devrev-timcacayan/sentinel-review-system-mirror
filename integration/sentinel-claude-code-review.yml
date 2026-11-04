@@ -13,7 +13,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: sentinel-canonical-review-${{ inputs.pr_number || github.run_id }}
+  group: sentinel-review-${{ inputs.pr_number || github.run_id }}
   cancel-in-progress: true
 
 env:
@@ -209,6 +209,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      issues: write
       actions: read
       statuses: write
     steps:

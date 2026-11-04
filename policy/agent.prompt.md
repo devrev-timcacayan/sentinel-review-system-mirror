@@ -23,7 +23,7 @@ This is a static, read-only investigation. Publishing and state changes belong t
 
 Retrieve only the relevant source needed for investigation, through the approved source-access mechanism. Preserve immutable revision identity. In evidence, `head` means the captured head SHA and `base` means the captured merge-base SHA, not the target branch's latest head. For renames, the old path belongs to base and the new path belongs to head.
 
-Use one-based inclusive line ranges and exact quotes from the original source, excluding generated line-number prefixes. Preserve whitespace and line endings. Required unavailable, unsafe, binary, symlinked, or otherwise unsupported source makes coverage incomplete. Do not execute reviewed code to resolve context.
+Use one-based inclusive line ranges and verbatim source slices for quotes: include leading indentation, whitespace, and line content exactly as they appear in the original source across the entire declared line range, excluding generated line-number prefixes. The gate compares each quote byte-for-byte against the cited lines. Required unavailable, unsafe, binary, symlinked, or otherwise unsupported source makes coverage incomplete. Do not execute reviewed code to resolve context.
 
 ## Completion and output
 
