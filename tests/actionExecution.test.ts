@@ -87,3 +87,29 @@ test('initialization and terminal result must belong to exactly one complete exe
     assert.throws(() => verifyActionExecution({ ...inputs, executionText: JSON.stringify(trace) }, EXPECTED));
   }
 });
+
+test('null turn/budget caps allow any finite actual usage but still enforce every other bound', (): void => {
+  const model = 'global.anthropic.claude-sonnet-5-5';
+  const report = { schemaVersion: 1, complete: true };
+  const receipt = verifyActionExecution(
+    { actionOutcome: 'success', actionConclusion: 'success', sessionId: 's-1', structuredOutput: JSON.stringify(report), executionText: JSON.stringify([
+      { type: 'system', subtype: 'init', session_id: 's-1', model },
+      { type: 'result', subtype: 'success', is_error: false, session_id: 's-1', permission_denials: [], modelUsage: { [model]: {} }, num_turns: 50, total_cost_usd: 6.25, duration_ms: 120_000, structured_output: report },
+    ]) },
+    { model, runId: 'r', maxTurns: null, maxBudgetUsd: null, maxDurationMs: 900_000 },
+  );
+  assert.equal(receipt.numTurns, 50);
+  assert.equal(receipt.estimatedCostUsd, 6.25);
+  for (const bad of [
+    { num_turns: 0 }, { num_turns: -1 }, { num_turns: 1.5 }, { total_cost_usd: -0.1 }, { total_cost_usd: 'x' }, { duration_ms: 900_001 },
+  ]) {
+    const trace = JSON.stringify([
+      { type: 'system', subtype: 'init', session_id: 's-1', model },
+      { type: 'result', subtype: 'success', is_error: false, session_id: 's-1', permission_denials: [], modelUsage: { [model]: {} }, num_turns: 1, total_cost_usd: 0.1, duration_ms: 1, structured_output: report, ...bad },
+    ]);
+    assert.throws(() => verifyActionExecution(
+      { actionOutcome: 'success', actionConclusion: 'success', sessionId: 's-1', structuredOutput: JSON.stringify(report), executionText: trace },
+      { model, runId: 'r', maxTurns: null, maxBudgetUsd: null, maxDurationMs: 900_000 },
+    ), JSON.stringify(bad));
+  }
+});

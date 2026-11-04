@@ -128,33 +128,38 @@ async function verifyEnvironment(deps: HostDeps): Promise<HostContext> {
   require(typeof env.GITHUB_SHA === 'string' && SHA_PATTERN.test(env.GITHUB_SHA), 'GITHUB_SHA must be a 40-char SHA');
   require(object(event) && object(event.inputs), 'dispatch event lacks inputs');
   const inputs = event.inputs;
-  require(
-    Object.keys(inputs).sort().join(',') === 'base_sha,head_sha,mode,pr_number',
-    'dispatch inputs must be exactly mode, pr_number, base_sha, head_sha',
-  );
-  require(inputs.mode === 'review', 'dispatch mode must be review for review jobs');
+  const keys = Object.keys(inputs).sort().join(',');
+  // The manual path takes pr_number only; the deprecated four-input dispatch
+  // remains accepted for older manual runs but still has to match the live PR.
+  require(keys === 'pr_number' || keys === 'base_sha,head_sha,mode,pr_number',
+    'dispatch inputs must be pr_number, or mode/pr_number/base_sha/head_sha for a legacy dispatch');
+  if (keys !== 'pr_number') {
+    require(inputs.mode === 'review', 'legacy dispatch mode must be review');
+    require(
+      typeof inputs.base_sha === 'string' && SHA_PATTERN.test(inputs.base_sha)
+      && typeof inputs.head_sha === 'string' && SHA_PATTERN.test(inputs.head_sha),
+      'legacy dispatch base_sha/head_sha must be lowercase 40-char SHAs',
+    );
+  }
   require(
     typeof inputs.pr_number === 'string' && /^[1-9][0-9]*$/.test(inputs.pr_number)
     && Number.isSafeInteger(Number(inputs.pr_number)) && String(Number(inputs.pr_number)) === inputs.pr_number,
     'dispatch pr_number must be a canonical positive decimal',
   );
-  require(
-    typeof inputs.base_sha === 'string' && SHA_PATTERN.test(inputs.base_sha)
-    && typeof inputs.head_sha === 'string' && SHA_PATTERN.test(inputs.head_sha),
-    'dispatch base_sha/head_sha must be lowercase 40-char SHAs',
-  );
-  require(inputs.base_sha === env.GITHUB_SHA, 'dispatch base_sha must equal the dispatched staging commit');
   const pullRequest = Number(inputs.pr_number);
-  require(env.SENTINEL_REVIEW_POC_APPROVED_PR === String(pullRequest), 'dispatch PR is not the approved POC PR');
   const response = await deps.http({ method: 'GET', path: `/repos/${REPOSITORY}/pulls/${String(pullRequest)}` });
   require(response.status === 200, `pull request lookup failed with status ${response.status}`);
   const pull = response.json;
   require(object(pull) && pull.number === pullRequest, 'pull lookup returned a different PR');
   require(pull.state === 'open', 'pull request is not open');
   require(object(pull.base) && pull.base.ref === 'staging', 'pull base is not staging');
-  require(object(pull.base) && pull.base.sha === inputs.base_sha, 'pull base SHA is stale against dispatch inputs');
-  require(object(pull.head) && pull.head.sha === inputs.head_sha, 'pull head SHA is stale against dispatch inputs');
+  require(object(pull.base) && typeof pull.base.sha === 'string' && SHA_PATTERN.test(pull.base.sha), 'pull base SHA invalid');
+  require(object(pull.head) && typeof pull.head.sha === 'string' && SHA_PATTERN.test(pull.head.sha), 'pull head SHA invalid');
   require(object(pull.head) && object(pull.head.repo) && pull.head.repo.full_name === REPOSITORY, 'pull head repository mismatch');
+  if (keys !== 'pr_number') {
+    require(pull.base.sha === inputs.base_sha, 'legacy dispatch base SHA is stale against the live PR');
+    require(pull.head.sha === inputs.head_sha, 'legacy dispatch head SHA is stale against the live PR');
+  }
   require(typeof pull.title === 'string' && TITLE_PATTERN.test(pull.title), 'PR title is not an approved POC test title');
   return {
     pullRequest,
@@ -585,7 +590,9 @@ async function postCommitStatus(deps: HostDeps, headSha: string, state: 'pending
 // verified identity before any status mutation.
 async function verifyStatusAuthorization(deps: HostDeps, options: Record<string, string>): Promise<HostContext> {
   const ctx = await verifyEnvironment(deps);
-  require(deps.env.SENTINEL_REVIEW_POC_APPROVED_PR === String(ctx.pullRequest), 'status stage PR is not the approved POC PR');
+  if (deps.env.GITHUB_EVENT_NAME !== 'workflow_dispatch') {
+    require(deps.env.SENTINEL_REVIEW_POC_APPROVED_PR === String(ctx.pullRequest), 'status stage PR is not the approved POC PR');
+  }
   const systemRoot = path.resolve(options.systemRoot ?? defaultSystemRoot());
   verifyPin(deps, systemRoot);
   await verifyRun(deps);

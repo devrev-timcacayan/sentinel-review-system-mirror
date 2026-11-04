@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { readActionControls, actionClaudeArgs } from '../src/actionControls.ts';
 import { runActionHost } from '../src/actionHost.ts';
 import { validateActionRequest } from '../src/agentContracts.ts';
 import { isReport } from '../src/gate.ts';
@@ -352,21 +353,21 @@ function makeDispatchRig(overrides: DispatchOverrides = {}): DispatchRig {
   const rig = makeRig() as DispatchRig;
   rig.statuses = [];
   const { baseSha, headSha } = rig.source;
-  const inputs: Record<string, unknown> = { mode: 'review', pr_number: '17', base_sha: baseSha, head_sha: headSha, ...(overrides.inputs ?? {}) };
+  const inputs: Record<string, unknown> = { pr_number: '17', ...(overrides.inputs ?? {}) };
   const eventPath = path.join(mkdtempSync(path.join(tmpdir(), 'srs-disp-')), 'event.json');
   writeFileSync(eventPath, JSON.stringify({ inputs }));
   rig.env = {
     ...rig.env,
     GITHUB_EVENT_NAME: 'workflow_dispatch',
     GITHUB_REF: 'refs/heads/staging',
-    GITHUB_SHA: baseSha,
+    GITHUB_SHA: 'e'.repeat(40),  // workflow code SHA; intentionally differs from PR base
     GITHUB_WORKFLOW_REF: 'devrev/sentinel/.github/workflows/claude-code-review.yml@refs/heads/staging',
     GITHUB_EVENT_PATH: eventPath,
     GITHUB_OUTPUT: path.join(mkdtempSync(path.join(tmpdir(), 'srs-out-')), 'out.txt'),
     ...(overrides.env ?? {}),
   };
   const pull = { number: 17, state: 'open', title: 'POC Test: dispatch-DO NOT REVIEW', body: null, base: { ref: 'staging', sha: baseSha }, head: { sha: headSha, repo: { full_name: REPO } }, ...(overrides.pull ?? {}) };
-  const run = { id: 7, run_attempt: 3, event: 'workflow_dispatch', path: '.github/workflows/claude-code-review.yml@refs/heads/staging', head_branch: 'staging', head_sha: baseSha, ...(overrides.run ?? {}) };
+  const run = { id: 7, run_attempt: 3, event: 'workflow_dispatch', path: '.github/workflows/claude-code-review.yml@refs/heads/staging', head_branch: 'staging', head_sha: 'e'.repeat(40), ...(overrides.run ?? {}) };
   rig.deps = {
     env: rig.env,
     git: rig.deps.git,
@@ -440,22 +441,17 @@ test('dispatch review runs the full pipeline including capture and posts status 
 });
 
 test('dispatch rejects malformed inputs and stale identities with specific reasons and zero writes', async (): Promise<void> => {
-  const valid = { mode: 'review' as string | number, pr_number: '17' as string | number };
   const cases: [string, DispatchOverrides, RegExp][] = [
-    ['mode-probe', { inputs: { mode: 'probe' } }, /mode must be review/],
     ['leading-zero-pr', { inputs: { pr_number: '017' } }, /pr_number/],
-    ['unsafe-pr', { inputs: { pr_number: '9007199254740993' }, env: { SENTINEL_REVIEW_POC_APPROVED_PR: '9007199254740993' } }, /pr_number/],
-    ['missing-key', { inputs: { head_sha: undefined } }, /exactly mode, pr_number, base_sha, head_sha/],
-    ['extra-key', { inputs: { sneaky: 'x' } }, /exactly mode, pr_number, base_sha, head_sha/],
-    ['invalid-sha', { inputs: { head_sha: 'ZZZ' } }, /40-char/],
+    ['unsafe-pr', { inputs: { pr_number: '9007199254740993' } }, /pr_number/],
+    ['missing-key', { inputs: { pr_number: undefined } }, /inputs must be pr_number/],
+    ['extra-key', { inputs: { sneaky: 'x' } }, /inputs must be pr_number/],
+    ['numeric-pr', { inputs: { pr_number: 17 } }, /pr_number/],
     ['wrong-ref', { env: { GITHUB_REF: 'refs/heads/other' } }, /staging ref/],
     ['wrong-workflow-ref', { env: { GITHUB_WORKFLOW_REF: 'devrev/sentinel/.github/workflows/other.yml@refs/heads/staging' } }, /canonical staging workflow/],
-    ['sha-not-base', { env: { GITHUB_SHA: 'e'.repeat(40) } }, /equal the dispatched staging commit/],
-    ['unapproved-pr', { env: { SENTINEL_REVIEW_POC_APPROVED_PR: '999' } }, /approved POC/],
-    ['workflow-sha-mismatch', { env: { GITHUB_WORKFLOW_SHA: 'e'.repeat(40) } }, /workflow ref SHA/],
+    ['workflow-sha-mismatch', { env: { GITHUB_WORKFLOW_SHA: 'a'.repeat(40) } }, /workflow ref SHA/],
     ['closed-pr', { pull: { state: 'closed' } }, /not open/],
     ['wrong-base-ref', { pull: { base: { ref: 'main', sha: 'b'.repeat(40) } } }, /not staging/],
-    ['stale-head', { pull: { head: { sha: 'd'.repeat(40), repo: { full_name: REPO } } } }, /stale/],
     ['fork-head', { pull: { head: { sha: 'c'.repeat(40), repo: { full_name: 'other/fork' } } } }, /repository mismatch|stale/],
     ['bad-title', { pull: { title: 'Normal PR title' } }, /POC test title/],
     ['pull-403', { run: { event: 'workflow_dispatch' } }, /.+/],
@@ -464,9 +460,8 @@ test('dispatch rejects malformed inputs and stale identities with specific reaso
     ['run-path', { run: { path: '.github/workflows/other.yml@x' } }, /review workflow/],
     ['run-event', { run: { event: 'pull_request_target' } }, /event mismatch/],
     ['run-branch', { run: { head_branch: 'main' } }, /staging branch/],
-    ['run-sha', { run: { head_sha: 'e'.repeat(40) } }, /dispatched staging commit/],
+    ['run-sha', { run: { head_sha: 'd'.repeat(40) } }, /dispatched staging commit/],
   ];
-  void valid;
   for (const [name, overrides, casePattern] of cases) {
     const rig = makeDispatchRig(overrides);
     let pattern = casePattern;
@@ -484,7 +479,7 @@ test('dispatch rejects malformed inputs and stale identities with specific reaso
 });
 
 test('unsafe pr_number with matching approval still makes no HTTP call', async (): Promise<void> => {
-  const rig = makeDispatchRig({ inputs: { pr_number: '9007199254740993' }, env: { SENTINEL_REVIEW_POC_APPROVED_PR: '9007199254740993' } });
+  const rig = makeDispatchRig({ inputs: { pr_number: '9007199254740993' } });
   let httpCalls = 0;
   const inner = rig.deps.http;
   rig.deps.http = (req: HttpRequest): HttpResponse => { httpCalls += 1; return inner(req) as HttpResponse; };
@@ -497,12 +492,10 @@ test('fail-status posts only error; unapproved PR blocks both status stages in b
   assert.equal(await runActionHost('fail-status', dispatchOptions(rig), rig.deps), 0);
   assert.deepEqual(rig.statuses.map((s) => s.state), ['error']);
   assert.equal(rig.statuses[0].sha, rig.source.headSha);
-  // Unapproved PR: status stages refuse in dispatch mode even without paid controls.
+  // Manual dispatch needs no approval flag: identity/pin/run still gate the status.
   const denied = makeDispatchRig({ env: { SENTINEL_REVIEW_POC_APPROVED_PR: '999', SENTINEL_REVIEW_CONTROLS_VERIFIED: '' } });
-  await runActionHost('start-status', dispatchOptions(denied), denied.deps).then(() => 'ok', () => 'rejected');
-  assert.equal(denied.statuses.length, 0);
-  await runActionHost('fail-status', dispatchOptions(denied), denied.deps).then(() => 'ok', () => 'rejected');
-  assert.equal(denied.statuses.length, 0);
+  assert.equal(await runActionHost('fail-status', dispatchOptions(denied), denied.deps), 0);
+  assert.deepEqual(denied.statuses.map((x) => x.state), ['error']);
   // pull_request_target mode: same approved-PR gate applies.
   const legacy = makeRig() as DispatchRig;
   legacy.statuses = [];
@@ -581,16 +574,75 @@ test('a live head change after reserve fails check and finalize, never success',
   const opts = dispatchOptions(rig);
   assert.equal(await runActionHost('reserve', { ...opts, out: rig.preparedDir }, rig.deps), 0);
   const pull = { number: 17, state: 'open', title: 'POC Test: dispatch-DO NOT REVIEW', body: null, base: { ref: 'staging', sha: rig.source.baseSha }, head: { sha: 'd'.repeat(40), repo: { full_name: REPO } } };
-  const run = { id: 7, run_attempt: 3, event: 'workflow_dispatch', path: '.github/workflows/claude-code-review.yml@x', head_branch: 'staging', head_sha: rig.source.baseSha };
+  const run = { id: 7, run_attempt: 3, event: 'workflow_dispatch', path: '.github/workflows/claude-code-review.yml@x', head_branch: 'staging', head_sha: rig.env.GITHUB_SHA };
   rig.deps.http = (request: HttpRequest): HttpResponse => {
     if (request.path.startsWith('/repos/devrev/sentinel/pulls/')) return { status: 200, json: pull };
     if (request.method === 'POST') { rig.posts.push(request); return { status: 201, json: {} }; }
     return { status: 200, json: run };
   };
   const checkOutcome = await runActionHost('check', { ...opts, prepared: rig.preparedDir }, rig.deps).then((c) => `code-${c}`, (e: Error) => `err:${e.message}`);
-  assert.match(checkOutcome, /stale|differs from captured|head/i, checkOutcome);
+  assert.match(checkOutcome, /stale|differs|match|commits|head/i, checkOutcome);
   const finOutcome = await runActionHost('finalize', { ...opts, prepared: rig.preparedDir, result: rig.resultDir, out: path.join(mkdtempSync(path.join(tmpdir(), 'finh-')), 'out') }, rig.deps).then((c) => `code-${c}`, (e: Error) => `err:${e.message}`);
   assert.match(finOutcome, /superseded|stale|differs|head/i, finOutcome);
   assert.equal(rig.posts.length, 0);
   assert.equal(rig.statuses.every((s) => s.state !== 'success'), true);
+});
+
+test('manual dispatch works with no approval/readiness flags and no USD or turn caps', async (): Promise<void> => {
+  const rig = makeDispatchRig();
+  delete rig.env.SENTINEL_REVIEW_POC_APPROVED_PR;
+  delete rig.env.SENTINEL_REVIEW_CONTROLS_VERIFIED;
+  delete rig.env.SENTINEL_REVIEW_MAX_USD;
+  delete rig.env.SENTINEL_REVIEW_MAX_TURNS;
+  rig.deps.env = rig.env;
+  const opts = dispatchOptions(rig);
+  assert.equal(await runActionHost('reserve', { ...opts, out: rig.preparedDir }, rig.deps), 0);
+  const hostContext = JSON.parse(readFileSync(path.join(rig.preparedDir, 'host-context.json'), 'utf8'));
+  assert.equal(hostContext.controls.maxTurns, null);
+  assert.equal(hostContext.controls.maxBudgetUsd, null);
+  assert.equal(await runActionHost('check', { ...opts, prepared: rig.preparedDir }, rig.deps), 0);
+  assert.equal(await runActionHost('materialize', { sourceCheckout: rig.source.repo.dir, prepared: rig.preparedDir, out: rig.outDir, systemRoot: SYSTEM_ROOT }, rig.deps), 0);
+  assert.doesNotMatch(readFileSync(rig.env.GITHUB_OUTPUT as string, 'utf8'), /max-turns|max-budget-usd/);
+  assert.match(readFileSync(rig.env.GITHUB_OUTPUT as string, 'utf8'), /--model|--json-schema|--restricted/);
+  const request = JSON.parse(readFileSync(path.join(rig.preparedDir, 'request.json'), 'utf8'));
+  const report = {
+    schemaVersion: 1, identity: request.identity, complete: true, limitations: [],
+    coverage: request.changes.flatMap((c: { path: string }) => ['test-validity', 'reliability-impact', 'maintainability'].map((dimension) => ({ path: c.path, dimension, assessment: 'reviewed', rationale: 'Reviewed.', relatedPaths: [] }))),
+    findings: [], reconciliations: [],
+  };
+  writeResult(rig, report);
+  const finOut = path.join(mkdtempSync(path.join(tmpdir(), 'fin-')), 'out');
+  assert.equal(await runActionHost('finalize', { ...opts, prepared: rig.preparedDir, result: rig.resultDir, out: finOut }, rig.deps), 0);
+  assert.deepEqual(rig.statuses.map((s) => s.state), ['success']);
+  assert.equal(rig.statuses[0].sha, rig.source.headSha);
+  assert.notEqual(rig.source.headSha, rig.env.GITHUB_SHA);
+});
+
+test('manual controls read null caps absent flags; malformed or missing required values still reject', (): void => {
+  const env = { GITHUB_EVENT_NAME: 'workflow_dispatch', SENTINEL_REVIEW_TIMEOUT_MINUTES: '15', SENTINEL_REVIEW_MAX_FILES: '200', SENTINEL_REVIEW_MAX_SOURCE_BYTES: '4000000', SENTINEL_REVIEW_MAX_READ_BYTES: '200000' };
+  const controls = readActionControls(env, 17);
+  assert.equal(controls.maxTurns, null);
+  assert.equal(controls.maxBudgetUsd, null);
+  const args = actionClaudeArgs(controls, 'model-x', { type: 'object' });
+  assert.doesNotMatch(args, /max-turns|max-budget-usd/);
+  assert.match(args, /--model|--json-schema|--restricted|--tools|--disallowedTools/);
+  assert.throws(() => readActionControls({ ...env, SENTINEL_REVIEW_MAX_USD: 'abc' }, 17), /MAX_USD/);
+  assert.throws(() => readActionControls({ ...env, SENTINEL_REVIEW_MAX_TURNS: 'x' }, 17), /MAX_TURNS/);
+  assert.throws(() => readActionControls({ ...env, SENTINEL_REVIEW_TIMEOUT_MINUTES: '' }, 17), /TIMEOUT/);
+  assert.throws(() => readActionControls({ ...env, SENTINEL_REVIEW_MAX_FILES: '' }, 17), /MAX_FILES/);
+});
+
+test('a legacy four-input dispatch still validates SHAs against the live PR', async (): Promise<void> => {
+  const rig = makeDispatchRig({ inputs: { mode: 'review', pr_number: '17', base_sha: 'f'.repeat(40), head_sha: 'e'.repeat(40) } });
+  const opts = dispatchOptions(rig);
+  // Mismatched legacy SHAs are stale against the live PR.
+  const outcome = await runActionHost('reserve', { ...opts, out: rig.preparedDir }, rig.deps).then((c) => `code-${c}`, (e: Error) => `err:${e.message}`);
+  assert.match(outcome, /stale/i, outcome);
+  // Matching legacy SHAs still pass.
+  const ok = makeDispatchRig();
+  const baseSha = ok.source.baseSha; const headSha = ok.source.headSha;
+  const eventPath = ok.env.GITHUB_EVENT_PATH as string;
+  writeFileSync(eventPath, JSON.stringify({ inputs: { mode: 'review', pr_number: '17', base_sha: baseSha, head_sha: headSha } }));
+  assert.equal(await runActionHost('reserve', { ...dispatchOptions(ok), out: ok.preparedDir }, ok.deps), 0);
+  assert.equal(ok.pushes.length, 1);
 });

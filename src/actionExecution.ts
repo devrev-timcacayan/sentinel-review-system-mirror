@@ -12,8 +12,10 @@ export interface ActionExecutionInputs {
 export interface ActionExecutionExpectations {
   model: string;
   runId: string;
-  maxTurns: number;
-  maxBudgetUsd: number;
+  // Manual dispatch drops the turn/spend ceilings by decision; a null cap
+  // skips only the upper-bound check. Actual usage is always strictly valid.
+  maxTurns: number | null;
+  maxBudgetUsd: number | null;
   maxDurationMs: number;
 }
 
@@ -50,8 +52,8 @@ export function verifyActionExecution(
   inputs: ActionExecutionInputs,
   expected: ActionExecutionExpectations,
 ): VerifiedActionExecution {
-  requireEvidence(Number.isSafeInteger(expected.maxTurns) && expected.maxTurns > 0, 'invalid turn limit');
-  requireEvidence(Number.isFinite(expected.maxBudgetUsd) && expected.maxBudgetUsd > 0, 'invalid estimated-cost limit');
+  requireEvidence(expected.maxTurns === null || (Number.isSafeInteger(expected.maxTurns) && expected.maxTurns > 0), 'invalid turn limit');
+  requireEvidence(expected.maxBudgetUsd === null || (Number.isFinite(expected.maxBudgetUsd) && expected.maxBudgetUsd > 0), 'invalid estimated-cost limit');
   requireEvidence(Number.isFinite(expected.maxDurationMs) && expected.maxDurationMs > 0, 'invalid duration limit');
   requireEvidence(inputs.actionOutcome === 'success' && inputs.actionConclusion === 'success', 'action did not succeed');
   requireEvidence(inputs.sessionId.trim().length > 0, 'missing session ID');
@@ -72,9 +74,9 @@ export function verifyActionExecution(
   requireEvidence(object(result.modelUsage) && Object.keys(result.modelUsage).length > 0, 'missing model usage identity');
   requireEvidence(Object.keys(result.modelUsage).every((model: string): boolean => model === expected.model), 'unexpected model or fallback usage');
   requireEvidence(Number.isSafeInteger(result.num_turns) && Number(result.num_turns) > 0
-    && Number(result.num_turns) <= expected.maxTurns, 'invalid or exceeded turn limit');
+    && (expected.maxTurns === null || Number(result.num_turns) <= expected.maxTurns), 'invalid or exceeded turn limit');
   requireEvidence(typeof result.total_cost_usd === 'number' && Number.isFinite(result.total_cost_usd)
-    && result.total_cost_usd >= 0 && result.total_cost_usd <= expected.maxBudgetUsd, 'invalid or exceeded estimated cost');
+    && result.total_cost_usd >= 0 && (expected.maxBudgetUsd === null || result.total_cost_usd <= expected.maxBudgetUsd), 'invalid or exceeded estimated cost');
   requireEvidence(typeof result.duration_ms === 'number' && Number.isFinite(result.duration_ms)
     && result.duration_ms >= 0 && result.duration_ms <= expected.maxDurationMs, 'invalid or exceeded duration');
   const report: unknown = parseStrictJson(inputs.structuredOutput);

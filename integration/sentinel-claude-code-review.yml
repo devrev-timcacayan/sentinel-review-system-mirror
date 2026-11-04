@@ -1,73 +1,31 @@
 name: Claude Code Review
 
-# Staging POC only. Manual dispatch runs an isolated no-model probe.
+# Staging POC only. Manual dispatch reviews one approved test PR.
 on:
-  pull_request_target:
-    branches: [staging]
-    types: [opened, reopened, synchronize, ready_for_review]
   workflow_dispatch:
     inputs:
-      mode:
-        description: 'Dispatch mode; probe is the safe default.'
-        type: choice
-        options: [probe, review]
-        required: true
-        default: probe
       pr_number:
-        description: 'PR number; required for mode review.'
+        description: 'PR number to review'
         type: string
-        required: false
-        default: ''
-      base_sha:
-        description: 'PR base SHA; required for mode review.'
-        type: string
-        required: false
-        default: ''
-      head_sha:
-        description: 'PR head SHA; required for mode review.'
-        type: string
-        required: false
-        default: ''
+        required: true
+        default: '529'
 
 permissions: {}
 
 concurrency:
-  group: sentinel-canonical-review-${{ github.event.pull_request.number || (inputs.mode == 'review' && inputs.pr_number) || github.run_id }}
+  group: sentinel-canonical-review-${{ inputs.pr_number || github.run_id }}
   cancel-in-progress: true
 
 env:
-  REVIEW_SYSTEM_SHA: ${{ vars.SENTINEL_REVIEW_SYSTEM_SHA }}
-  SENTINEL_REVIEW_POC_APPROVED_PR: ${{ vars.SENTINEL_REVIEW_POC_APPROVED_PR }}
-  SENTINEL_REVIEW_CONTROLS_VERIFIED: ${{ vars.SENTINEL_REVIEW_CONTROLS_VERIFIED }}
-  SENTINEL_REVIEW_MAX_USD: ${{ vars.SENTINEL_REVIEW_MAX_USD }}
-  SENTINEL_REVIEW_MAX_TURNS: ${{ vars.SENTINEL_REVIEW_MAX_TURNS }}
-  SENTINEL_REVIEW_TIMEOUT_MINUTES: ${{ vars.SENTINEL_REVIEW_TIMEOUT_MINUTES }}
-  SENTINEL_REVIEW_MAX_FILES: ${{ vars.SENTINEL_REVIEW_MAX_FILES }}
-  SENTINEL_REVIEW_MAX_SOURCE_BYTES: ${{ vars.SENTINEL_REVIEW_MAX_SOURCE_BYTES }}
-  SENTINEL_REVIEW_MAX_READ_BYTES: ${{ vars.SENTINEL_REVIEW_MAX_READ_BYTES }}
+  REVIEW_SYSTEM_SHA: 'a531300dd232c623e229e6ff25231faae1992502'
+  SENTINEL_REVIEW_TIMEOUT_MINUTES: '15'
+  SENTINEL_REVIEW_MAX_FILES: '200'
+  SENTINEL_REVIEW_MAX_SOURCE_BYTES: '4000000'
+  SENTINEL_REVIEW_MAX_READ_BYTES: '200000'
 
 jobs:
-  staging-dispatch-probe:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode != 'review' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 1
-    permissions: {}
-    steps:
-      - name: Verify the dispatched staging workflow ref
-        shell: bash
-        env:
-          PROBE_MODE: ${{ inputs.mode }}
-        run: |
-          set -euo pipefail
-          printf 'event=%s\nref=%s\nsha=%s\nworkflow_ref=%s\n' "$GITHUB_EVENT_NAME" "$GITHUB_REF" "$GITHUB_SHA" "$GITHUB_WORKFLOW_REF"
-          test "$GITHUB_EVENT_NAME" = 'workflow_dispatch'
-          test "$PROBE_MODE" = 'probe'
-          test "$GITHUB_REPOSITORY" = 'devrev/sentinel'
-          test "$GITHUB_REF" = 'refs/heads/staging'
-          test "$GITHUB_WORKFLOW_REF" = 'devrev/sentinel/.github/workflows/claude-code-review.yml@refs/heads/staging'
-
   prepare:
-    if: ${{ github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'review') }}
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -79,14 +37,14 @@ jobs:
     steps:
       - name: Require a pinned canonical reviewer and private checkout access
         env:
-          READ_TOKEN_PRESENT: ${{ secrets.SENTINEL_REVIEW_SYSTEM_READ_TOKEN != '' }}
+          READ_TOKEN_PRESENT: ${{ secrets.CLAUDE_REVIEW_PAT != '' }}
         run: |
-          node -e 'if (!/^[0-9a-f]{40}$/.test(process.env.REVIEW_SYSTEM_SHA || "") || process.env.READ_TOKEN_PRESENT !== "true") { throw new Error("Configure the approved reviewer commit and read-only private checkout token first."); }'
+          node -e 'if (!/^[0-9a-f]{40}$/.test(process.env.REVIEW_SYSTEM_SHA || "") || process.env.READ_TOKEN_PRESENT !== "true") { throw new Error("The existing CLAUDE_REVIEW_PAT needs read access to the review repository."); }'
 
       - name: Checkout trusted Sentinel base and Git history
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.pull_request.base.sha || inputs.base_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -95,7 +53,7 @@ jobs:
         with:
           repository: devrev/sentinel-review-system
           ref: ${{ env.REVIEW_SYSTEM_SHA }}
-          token: ${{ secrets.SENTINEL_REVIEW_SYSTEM_READ_TOKEN }}
+          token: ${{ secrets.CLAUDE_REVIEW_PAT }}
           path: review-system
           persist-credentials: false
 
@@ -139,7 +97,7 @@ jobs:
           if-no-files-found: error
 
   investigate:
-    if: ${{ needs.prepare.result == 'success' && (github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'review')) }}
+    if: ${{ github.event_name == 'workflow_dispatch' && needs.prepare.result == 'success' }}
     needs: prepare
     runs-on: ubuntu-latest
     # The fallback is only for a skipped job after failed preparation, never a run limit.
@@ -152,7 +110,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.pull_request.base.sha || inputs.base_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -160,7 +118,7 @@ jobs:
         with:
           repository: devrev/sentinel-review-system
           ref: ${{ env.REVIEW_SYSTEM_SHA }}
-          token: ${{ secrets.SENTINEL_REVIEW_SYSTEM_READ_TOKEN }}
+          token: ${{ secrets.CLAUDE_REVIEW_PAT }}
           path: review-system
           persist-credentials: false
 
@@ -245,7 +203,7 @@ jobs:
           if-no-files-found: error
 
   claude-auto-review:
-    if: ${{ always() && (github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'review')) }}
+    if: ${{ always() && github.event_name == 'workflow_dispatch' }}
     needs: [prepare, investigate]
     runs-on: ubuntu-latest
     permissions:
@@ -260,7 +218,7 @@ jobs:
 
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.pull_request.base.sha || inputs.base_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -268,7 +226,7 @@ jobs:
         with:
           repository: devrev/sentinel-review-system
           ref: ${{ env.REVIEW_SYSTEM_SHA }}
-          token: ${{ secrets.SENTINEL_REVIEW_SYSTEM_READ_TOKEN }}
+          token: ${{ secrets.CLAUDE_REVIEW_PAT }}
           path: review-system
           persist-credentials: false
 

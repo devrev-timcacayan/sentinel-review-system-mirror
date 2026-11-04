@@ -8,25 +8,36 @@ artifacts either (mode/synthetic/operational flags are validated as an exact pai
 ## Status and blockers
 
 This is implemented code plus offline contract tests, not an activated or
-runtime-verified integration. Activation requires, before any paid run:
+runtime-verified integration. The manual staging POC requires, before any paid
+run:
 
-- `SENTINEL_REVIEW_CONTROLS_VERIFIED=true` is still unset; the operator must
-  verify exact pinned-version behavior (tool isolation, settings, and the SDK
-  message-array execution-trace format consumed by `verifyActionExecution`).
-  The trace format was authored fail-closed but not proved by source capture,
-  so it remains an activation blocker alongside runtime flag isolation.
-- `SENTINEL_REVIEW_POC_APPROVED_PR=<number>` naming the one approved test PR.
-- Explicit `SENTINEL_REVIEW_MAX_TURNS`, `SENTINEL_REVIEW_MAX_USD`,
-  `SENTINEL_REVIEW_TIMEOUT_MINUTES`, `SENTINEL_REVIEW_MAX_FILES`,
-  `SENTINEL_REVIEW_MAX_SOURCE_BYTES`, `SENTINEL_REVIEW_MAX_READ_BYTES`.
-- `REVIEW_SYSTEM_SHA` 40-hex pin equal to the review-system checkout HEAD;
-  the checkout must be pristine. The workflow maps
-  `vars.SENTINEL_REVIEW_SYSTEM_SHA` to this env var.
-- `GH_TOKEN`/`GITHUB_TOKEN` per job, and the private checkout secret
-  `SENTINEL_REVIEW_SYSTEM_READ_TOKEN` for the review-system repository.
-- The operational branch `sentinel-review-state` must already exist on
-  `devrev/sentinel` with a valid `index.json`. It is provisioned out of band;
-  the code fails closed on a missing/corrupt index and never auto-creates it.
+- A manual `workflow_dispatch` of `claude-code-review.yml` on `staging` with
+  `pr_number` (e.g. `gh workflow run claude-code-review.yml --ref staging -f
+  pr_number=529`). One required string input; no mode/base/head inputs, no
+  probe job, no `pull_request_target` trigger on this staging template.
+- `REVIEW_SYSTEM_SHA` is pinned literally in the workflow (current value is a
+  temporary commit pending the adapter pin); no variable substitution.
+- The existing `CLAUDE_REVIEW_PAT` secret must have read access to the review
+  repository; no new secrets were created.
+- Fixed limits: 15-minute timeout, 200 files, 4,000,000 source bytes, 200,000
+  per-read bytes. There are no USD or turn caps on the manual path; recorded
+  usage remains evidence for later refinement. Nothing else needs
+  operator-provisioned env or readiness flags.
+- `sentinel-review-state` was initialized on `devrev/sentinel` with an empty
+  index at commit `978f6f58c3ad4befd4fbbc2613ab37b0f0d5cfca`. The runtime
+  still fails closed on missing or corrupt state and never auto-initializes.
+- The `sentinel-canonical-review` status context must be configured on staging
+  before treating it as a mandatory merge check; this work does not configure
+  branch protection or required checks and a dispatch success is not PR
+  approval.
+- Source-layout, restricted-tools, settings, and SDK trace-format facts are
+  confirmed by lead source capture of the pinned action
+  (`1d6de8cb0c237e7c15e9e1bdf973826ebae490cc`) and local `claude --help`, not
+  by a successful cloud model run; runtime behavior is still unverified.
+
+Legacy `pull_request_target` host paths still require the old
+`SENTINEL_REVIEW_POC_APPROVED_PR` / `SENTINEL_REVIEW_CONTROLS_VERIFIED` flags
+and positive numeric caps; those flags do not apply to manual dispatch.
 
 ## Stages (`cli action-host <stage>`)
 
