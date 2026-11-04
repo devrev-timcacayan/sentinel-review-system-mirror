@@ -10,6 +10,7 @@ import { buildReviewBundle } from './partitionPlanner.ts';
 import { projectPartition } from './partitionContract.ts';
 import { defaultStateRoot, migrateLegacyJournal, prStore, readLedger, recordReview, withPrLock } from './state.ts';
 import { prepareRetrospective, validateCloseEvent } from './retrospective.ts';
+import { commandPrepareAgent, commandValidateAgent } from './agentCli.ts';
 import type { PartitionManifest, ReviewLedger, ReviewSnapshot } from './contracts.ts';
 
 const USAGE = `sentinel-review-system (local shadow-mode POC)
@@ -20,6 +21,8 @@ Usage:
   cli record --snapshot FILE --report FILE [--state-root PATH] [--system-root PATH]
   cli retrospective --repository OWNER/REPO --pr N --event FILE --out DIR [--state-root PATH] [--system-root PATH]
   cli journal-migrate --repository OWNER/REPO --pr N [--state-root PATH] [--system-root PATH]
+  cli prepare-agent --offline true --checkout PATH --repository OWNER/REPO --pr N --base REF --head REF --run-id ID --review-system-sha SHA --prior-state FILE --validation-limits FILE --out DIR [--system-root PATH]
+  cli validate-agent --offline true --checkout PATH --request FILE --report FILE --execution FILE --current FILE --prior-state FILE --out DIR [--system-root PATH]
   cli --help
 
 prepare-bundle captures the full source set without the maxFiles entry cap (total byte cap unchanged),
@@ -29,7 +32,14 @@ An incomplete parent or an unsplittable context root exits 3 with limitations an
 
 Exit codes for record: 0 pass, 2 changes_required, 3 incomplete, 1 operational/input failure.
 Snapshot files are operator-supplied local collector artifacts; this tool validates their shape and
-policy digest but makes no authenticity claim for untrusted uploads.`;
+policy digest but makes no authenticity claim for untrusted uploads.
+
+prepare-agent/validate-agent are OFFLINE-ONLY seams (require --offline true) for the agent
+integration prototype. They read a synthetic prior-state checkpoint, local Git objects, a
+fabricated structured_output report, and synthetic execution/current attestations, then emit
+synthetic artifacts. They access no journal or operational state and authorize nothing.
+Exit codes for validate-agent: 0 synthetic pass, 2 synthetic changes_required, 3 incomplete,
+1 malformed invocation/input.`;
 
 class UsageError extends Error {}
 
@@ -311,6 +321,8 @@ export function runCli(argv: string[]): number {
     if (command === 'record') return commandRecord(rest);
     if (command === 'retrospective') return commandRetrospective(rest);
     if (command === 'journal-migrate') return commandJournalMigrate(rest);
+    if (command === 'prepare-agent') return commandPrepareAgent(rest);
+    if (command === 'validate-agent') return commandValidateAgent(rest);
     throw new UsageError(`Unknown command: ${String(command)}\n\n${USAGE}`);
   } catch (error) {
     if (error instanceof UsageError) {

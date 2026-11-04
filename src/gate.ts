@@ -111,7 +111,7 @@ function isPartitionScope(value: unknown): value is { manifestDigest: string; pa
     && typeof value.partitionId === 'string' && /^part-[0-9]{3,}$/.test(value.partitionId);
 }
 
-function isReport(value: unknown): value is ReviewReport {
+export function isReport(value: unknown): value is ReviewReport {
   return isObject(value)
     && hasKeys(value, [
       'schemaVersion', 'identity', 'complete', 'limitations', 'coverage', 'findings', 'reconciliations',
@@ -132,7 +132,15 @@ function sameIdentity(left: ReviewIdentity, right: ReviewIdentity): boolean {
     .every((key: keyof ReviewIdentity): boolean => left[key] === right[key]);
 }
 
-function evidenceExists(snapshot: ReviewSnapshot, evidence: Evidence): boolean {
+// The single-review gate only reads these fields. Packet callers pass full ReviewSnapshot
+// values; agent validation passes a verification context whose files are a locally loaded
+// evidence cache, never a packet served to the model.
+export type ReviewEvaluationContext = Pick<
+  ReviewSnapshot,
+  'identity' | 'previousHeadSha' | 'changes' | 'size' | 'files' | 'dependencyEdges' | 'complete' | 'limitations' | 'partitionScope'
+>;
+
+function evidenceExists(snapshot: ReviewEvaluationContext, evidence: Evidence): boolean {
   const source = snapshot.files.find((file): boolean => file.path === evidence.path && file.revision === evidence.revision);
   if (!source) return false;
   const lines = source.content.split('\n');
@@ -189,8 +197,8 @@ export function inspectPartitionReport(
   };
 }
 
-function evaluateSingleReview(
-  snapshot: ReviewSnapshot,
+export function evaluateSingleReview(
+  snapshot: ReviewEvaluationContext,
   input: unknown,
   previous: ReviewLedger,
   policy: ReviewPolicy,

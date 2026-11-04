@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { isUtf8 } from 'node:buffer';
 import ts from 'typescript';
 import type { LoadedPolicy } from './policy.ts';
 import { planReviewContext } from './contextPlanner.ts';
@@ -573,6 +574,237 @@ export function collectSnapshot(options: CollectSnapshotOptions, loaded: LoadedP
     complete: limitations.length === 0,
     limitations,
   };
+}
+
+export interface CollectAgentMetadataOptions {
+  checkout: string;
+  repository: string;
+  pullRequest: number;
+  baseRef: string;
+  headRef: string;
+  previousHeadSha: string | null;
+  runId: string;
+  // The caller binds the domain-separated agent trust digest; this collector
+  // never substitutes the packet policy digest for it.
+  policyDigest: string;
+  // Per-read byte ceiling for the required-source preflight; supplied by the
+  // caller's offline validation profile, never defaulted here.
+  maxReadBytes: number;
+}
+
+export interface AgentReviewMetadata {
+  identity: {
+    repository: string;
+    pullRequest: number;
+    headSha: string;
+    baseSha: string;
+    mergeBaseSha: string;
+    policyDigest: string;
+    model: string;
+    runId: string;
+  };
+  previousHeadSha: string | null;
+  changes: Change[];
+  size: SizeAssessment;
+  cumulativeDiff: string;
+  deltaDiff: string | null;
+  dependencyEdges: DependencyEdge[];
+  complete: boolean;
+  limitations: string[];
+}
+
+// Metadata-only variant of the snapshot collector for the offline agent path.
+// It deliberately never calls collectSnapshot, planReviewContext, buildReviewBundle,
+// or source serialization: dependencyEdges cover only edges directly incident to
+// changed/previous paths, and no file content leaves this function.
+export function collectAgentMetadata(options: CollectAgentMetadataOptions, loaded: LoadedPolicy): AgentReviewMetadata {
+  const { policy } = loaded;
+  const limitations: string[] = [];
+  if (!policy.repositories.includes(options.repository)) {
+    throw new Error(`Repository ${options.repository} is outside the trusted policy allowlist.`);
+  }
+  if (!Number.isSafeInteger(options.pullRequest) || options.pullRequest <= 0) {
+    throw new Error(`Invalid pull request number: ${options.pullRequest}`);
+  }
+  if (!RUN_ID_PATTERN.test(options.runId)) throw new Error(`Invalid run id: ${options.runId}`);
+  if (!/^[0-9a-f]{64}$/.test(options.policyDigest)) throw new Error(`Invalid agent policy digest: ${options.policyDigest}`);
+  if (!Number.isSafeInteger(options.maxReadBytes) || options.maxReadBytes <= 0) {
+    throw new Error(`Invalid maxReadBytes for required-source preflight: ${options.maxReadBytes}`);
+  }
+  git(options.checkout, ['rev-parse', '--git-dir']);
+
+  const headSha = resolveRefToSha(options.checkout, options.headRef, 'head');
+  const baseSha = resolveRefToSha(options.checkout, options.baseRef, 'base');
+  const mergeBaseSha = git(options.checkout, ['merge-base', baseSha, headSha]).toString('utf8').trim();
+  if (!SHA_PATTERN.test(mergeBaseSha)) throw new Error('merge-base did not produce a commit SHA');
+
+  let previousHeadSha: string | null = null;
+  if (options.previousHeadSha !== null) {
+    previousHeadSha = resolveRefToSha(options.checkout, options.previousHeadSha, 'previous-head');
+  }
+
+  const nameStatus = git(options.checkout, ['diff', '--name-status', '-z', '-M', '--no-ext-diff', '--no-textconv', mergeBaseSha, headSha]).toString('utf8');
+  const changes = parseNameStatus(nameStatus);
+  refuseUnsafeChangePaths(changes, `cumulative diff ${mergeBaseSha}..${headSha}`);
+
+  if (previousHeadSha !== null) {
+    const deltaNameStatus = git(options.checkout, ['diff', '--name-status', '-z', '-M', '--no-ext-diff', '--no-textconv', previousHeadSha, headSha]).toString('utf8');
+    refuseUnsafeChangePaths(parseNameStatus(deltaNameStatus), `previous-head delta ${previousHeadSha}..${headSha}`);
+  }
+
+  const changedLines = countChangedLines(options.checkout, mergeBaseSha, headSha);
+  if (changedLines > policy.limits.blockChangedLines) {
+    throw new Error(
+      `Preparation refused: cumulative PR has ${changedLines} changed lines, exceeding the agreed ${policy.limits.blockChangedLines}-line limit. `
+      + 'Break the change into focused, independently reviewable PRs and retry. No review request was produced.',
+    );
+  }
+  const size: SizeAssessment = {
+    changedLines,
+    warnChangedLines: policy.limits.warnChangedLines,
+    blockChangedLines: policy.limits.blockChangedLines,
+    outcome: changedLines > policy.limits.warnChangedLines ? 'split_recommended' : 'within_threshold',
+  };
+
+  const cumulativeDiff = git(options.checkout, ['diff', '--no-ext-diff', '--no-textconv', mergeBaseSha, headSha]).toString('utf8');
+  if (Buffer.byteLength(cumulativeDiff, 'utf8') > policy.limits.maxDiffBytes) {
+    limitations.push(`Cumulative diff is ${Buffer.byteLength(cumulativeDiff, 'utf8')} bytes, exceeding policy maxDiffBytes ${policy.limits.maxDiffBytes}.`);
+  }
+
+  let deltaDiff: string | null = null;
+  if (previousHeadSha !== null) {
+    const twoTree = git(options.checkout, ['diff', '--no-ext-diff', '--no-textconv', previousHeadSha, headSha]).toString('utf8');
+    const ancestor = spawnSync('git', ['-C', options.checkout, 'merge-base', '--is-ancestor', previousHeadSha, headSha]);
+    if (ancestor.status !== 0 && ancestor.status !== 1) {
+      throw new Error(`git merge-base --is-ancestor failed in ${options.checkout}: ${ancestor.stderr?.toString('utf8').trim() ?? `exit ${ancestor.status}`}`);
+    }
+    if (ancestor.status === 0) {
+      deltaDiff = twoTree;
+    } else {
+      deltaDiff = `# informational: previous head ${previousHeadSha} is not an ancestor of head ${headSha} (e.g. rebase); this delta is a two-tree navigation aid only.\n${twoTree}`;
+    }
+  }
+
+  const headTree = listTree(options.checkout, headSha);
+  const baseTree = listTree(options.checkout, mergeBaseSha);
+  const headGraph = buildGraph(options.checkout, headSha, headTree);
+  const baseGraph = buildGraph(options.checkout, mergeBaseSha, baseTree);
+  const unresolved = [...new Set([...headGraph.unresolved, ...baseGraph.unresolved])].sort();
+  if (unresolved.length > 0) {
+    const shown = unresolved.slice(0, 25).join('; ');
+    limitations.push(`Unresolved internal imports (${unresolved.length}): ${shown}${unresolved.length > 25 ? `; ... +${unresolved.length - 25} more` : ''}.`);
+  }
+  const tsconfigLimitations = new Set<string>();
+  for (const [sha, tree] of [[headSha, headTree], [mergeBaseSha, baseTree]] as [string, Map<string, TreeEntry>][]) {
+    const { limitation } = loadTsconfigPaths(options.checkout, sha, tree);
+    if (limitation) tsconfigLimitations.add(limitation);
+  }
+  limitations.push(...tsconfigLimitations);
+
+  // Required-source preflight: canonical guidance at merge base plus changed
+  // before/after source must be present and safely readable. Content is never
+  // serialized here; failures become limitations, so known gaps mark the
+  // metadata incomplete instead of producing a prepared request that cannot
+  // actually be verified.
+  const requiredSource = new Map<string, { revision: 'head' | 'base'; path: string }>();
+  const requireSource = (revision: 'head' | 'base', filePath: string): void => {
+    requiredSource.set(`${revision}:${filePath}`, { revision, path: filePath });
+  };
+  for (const contextPath of policy.contextPaths) requireSource('base', contextPath);
+  for (const change of changes) {
+    if (change.status !== 'deleted') requireSource('head', change.path);
+    if (change.status !== 'added') requireSource('base', change.previousPath ?? change.path);
+  }
+  const sourceSha: Record<'head' | 'base', string> = { head: headSha, base: mergeBaseSha };
+  const sourceTree: Record<'head' | 'base', Map<string, TreeEntry>> = { head: headTree, base: baseTree };
+  for (const item of requiredSource.values()) {
+    try {
+      const content = readAgentSource(options.checkout, sourceSha[item.revision], item.path, options.maxReadBytes, sourceTree[item.revision]);
+      if (content === null) {
+        limitations.push(`Required source ${item.path} is absent at the ${item.revision} revision.`);
+      }
+    } catch (error) {
+      limitations.push(`Required source ${item.path} at the ${item.revision} revision is unusable: ${(error as Error).message}`);
+    }
+  }
+
+  const relevantPaths = new Set(changes.flatMap((change): string[] => [change.path, ...(change.previousPath ? [change.previousPath] : [])]));
+  const incident = new Map<string, DependencyEdge>();
+  for (const edge of [...headGraph.edges, ...baseGraph.edges]) {
+    if (!relevantPaths.has(edge.from) && !relevantPaths.has(edge.to)) continue;
+    incident.set(JSON.stringify([edge.from, edge.to]), edge);
+  }
+  const dependencyEdges = [...incident.values()]
+    .sort((left: DependencyEdge, right: DependencyEdge): number => left.from.localeCompare(right.from) || left.to.localeCompare(right.to));
+
+  return {
+    identity: {
+      repository: options.repository,
+      pullRequest: options.pullRequest,
+      headSha,
+      baseSha,
+      mergeBaseSha,
+      policyDigest: options.policyDigest,
+      model: policy.model,
+      runId: options.runId,
+    },
+    previousHeadSha,
+    changes,
+    size,
+    cumulativeDiff,
+    deltaDiff,
+    dependencyEdges,
+    complete: limitations.length === 0,
+    limitations,
+  };
+}
+
+export interface AgentTreeEntry {
+  mode: string;
+  type: string;
+  oid: string;
+}
+
+export function listAgentTree(checkout: string, sha: string): Map<string, AgentTreeEntry> {
+  return listTree(checkout, sha);
+}
+
+// Reads one repository path from an immutable commit tree. Returns null only when the
+// path is truly absent at that revision; unsafe, secret-like, symlinked, submodule,
+// non-blob, missing-blob, binary, or oversized entries are errors, never fallbacks.
+export function readAgentSource(
+  checkout: string,
+  sha: string,
+  filePath: string,
+  maxReadBytes: number = Number.MAX_SAFE_INTEGER,
+  tree?: Map<string, AgentTreeEntry>,
+): string | null {
+  if (!isSafeRepoPath(filePath)) throw new Error(`Unsafe source path refused: ${filePath}`);
+  if (isForbiddenRepoPath(filePath)) throw new Error(`Secret-like source path refused: ${filePath}`);
+  if (!SHA_PATTERN.test(sha)) throw new Error(`Invalid source revision: ${sha}`);
+  const resolvedTree = tree ?? listTree(checkout, sha);
+  const entry = resolvedTree.get(filePath);
+  if (entry === undefined) return null;
+  if (entry.type === 'commit' || entry.mode === '160000') {
+    throw new Error(`Submodule ${filePath} cannot be expanded for offline source reads.`);
+  }
+  if (entry.mode === '120000') {
+    throw new Error(`Symlink ${filePath} is never followed for offline source reads.`);
+  }
+  if (entry.type !== 'blob') {
+    throw new Error(`Non-blob tree entry ${filePath} cannot supply review source.`);
+  }
+  const sizeText = git(checkout, ['cat-file', '-s', entry.oid]).toString('utf8').trim();
+  const size = Number(sizeText);
+  if (!Number.isSafeInteger(size) || size < 0) throw new Error(`Unexpected blob size for ${filePath}: ${sizeText}`);
+  if (size > maxReadBytes) {
+    throw new Error(`Source ${filePath} is ${size} bytes, exceeding the offline per-read limit ${maxReadBytes}.`);
+  }
+  const blob = readBlobs(checkout, [entry.oid]).get(entry.oid);
+  if (!blob || blob === 'missing') throw new Error(`Blob for ${filePath} unreadable at revision ${sha}.`);
+  if (blob.includes(0)) throw new Error(`Binary file ${filePath} cannot supply review source.`);
+  if (!isUtf8(blob)) throw new Error(`Source ${filePath} is not valid UTF-8 and cannot supply review source.`);
+  return blob.toString('utf8');
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
