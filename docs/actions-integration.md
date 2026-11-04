@@ -15,8 +15,8 @@ run:
   `pr_number` (e.g. `gh workflow run claude-code-review.yml --ref staging -f
   pr_number=529`). One required string input; no mode/base/head inputs, no
   probe job, no `pull_request_target` trigger on this staging template.
-- `REVIEW_SYSTEM_SHA` is pinned literally in the workflow (current value is a
-  temporary commit pending the adapter pin); no variable substitution.
+- `REVIEW_SYSTEM_SHA` is pinned literally in the workflow to commit
+  `2c803767dd7a441d4bf77f5c0bd6f6088f85c0d7`; no variable substitution.
 - The existing `CLAUDE_REVIEW_PAT` secret must have read access to the review
   repository; no new secrets were created.
 - Fixed limits: 15-minute timeout, 200 files, 4,000,000 source bytes, 200,000
@@ -42,9 +42,12 @@ and positive numeric caps; those flags do not apply to manual dispatch.
 ## Stages (`cli action-host <stage>`)
 
 The review stages, other than data-only `capture`, verify `GITHUB_ACTIONS=true`, `GITHUB_REPOSITORY=devrev/sentinel`,
-`GITHUB_EVENT_NAME` `pull_request_target` or an explicit `mode: review`
-`workflow_dispatch` on `refs/heads/staging` (exact inputs: approved PR number,
-`base_sha` equal to `GITHUB_SHA`, `head_sha`), positive decimal run id/attempt, the
+`GITHUB_EVENT_NAME` `pull_request_target` or a `workflow_dispatch` on
+`refs/heads/staging` with one `pr_number` input (a deprecated four-input
+variant remains accepted and must match the live PR; provided SHAs are never
+compared to `GITHUB_SHA`, which is the workflow-code commit). The reviewed
+base/head are captured from the live PR API response, never from inputs.
+Positive decimal run id/attempt, the
 event payload (staging base, same-repo head, full 40-hex SHAs, `POC Test:
 <desc>-DO NOT REVIEW` title), derives runId `gha-<run>-<attempt>`, and enforces
 the reviewer pin. GitHub API calls are limited to:

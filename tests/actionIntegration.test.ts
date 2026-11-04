@@ -324,7 +324,7 @@ test('manual dispatch workflow exposes one PR input and the canonical guards', (
   const template = readFileSync(path.join(SYSTEM_ROOT, 'integration', 'sentinel-claude-code-review.yml'), 'utf8');
   assert.doesNotMatch(template, /pull_request_target|staging-dispatch-probe|PROBE_MODE|inputs\.mode|inputs\.base_sha|inputs\.head_sha/);
   assert.match(template, /workflow_dispatch:\s*\n\s+inputs:\s*\n\s+pr_number:\s*\n\s+description: 'PR number to review'\s*\n\s+type: string\s*\n\s+required: true\s*\n\s+default: '529'/);
-  assert.match(template, /REVIEW_SYSTEM_SHA: 'a531300dd232c623e229e6ff25231faae1992502'/);
+  assert.match(template, /REVIEW_SYSTEM_SHA: '2c803767dd7a441d4bf77f5c0bd6f6088f85c0d7'/);
   assert.doesNotMatch(template, /SENTINEL_REVIEW_MAX_USD|SENTINEL_REVIEW_MAX_TURNS/);
   assert.match(template, /secrets\.CLAUDE_REVIEW_PAT/);
   assert.doesNotMatch(template, /SENTINEL_REVIEW_POC_APPROVED_PR|SENTINEL_REVIEW_CONTROLS_VERIFIED|SENTINEL_REVIEW_SYSTEM_READ_TOKEN/);
