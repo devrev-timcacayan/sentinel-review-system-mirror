@@ -16,12 +16,12 @@ run:
   pr_number=529`). One required string input; no mode/base/head inputs, no
   probe job, no `pull_request_target` trigger on this staging template.
 - `REVIEW_SYSTEM_SHA` is pinned literally in the workflow to commit
-  `f6a057c23cf9b005fae5058579405a811d5b0b81`; no variable substitution.
+  `cc349ac9e03736939e80ce81feae2e506ab064f2`; no variable substitution.
 - The dedicated `SENTINEL_REVIEW_SYSTEM_READ_TOKEN` secret is used for the
   reviewer checkouts and must have read access to the review repository.
   Run 41839027490 proved the private checkout and AWS auth path; that run
   failed only on the report $schema dialect, fixed locally at
-  f6a057c23cf9b005fae5058579405a811d5b0b81. A complete live model review
+  cc349ac9e03736939e80ce81feae2e506ab064f2. A complete live model review
   remains unproven.
 - Fixed limits: 15-minute timeout, 200 files, 4,000,000 source bytes, 200,000
   per-read bytes. There are no USD or turn caps on the manual path; recorded
