@@ -24,6 +24,10 @@ export const AGENT_TRUSTED_PATHS = [
   'src/agentContracts.ts',
   'src/agentReview.ts',
   'src/agentCli.ts',
+  'src/actionControls.ts',
+  'src/actionExecution.ts',
+  'src/actionHost.ts',
+  'src/actionState.ts',
 ] as const;
 
 export interface AgentValidationLimits {
@@ -46,9 +50,9 @@ export interface AgentPriorCheckpoint {
 export interface AgentReviewRequest {
   schemaVersion: 1;
   kind: 'agent-review';
-  mode: 'offline';
-  synthetic: true;
-  operational: false;
+  mode: 'offline' | 'action';
+  synthetic: boolean;
+  operational: boolean;
   reviewSystemSha: string;
   priorStateVersion: string;
   priorLedger: ReviewLedger;
@@ -88,9 +92,9 @@ export interface AgentCurrentAttestation {
 
 export interface AgentDecisionEnvelope {
   schemaVersion: 1;
-  kind: 'offline-agent-decision';
-  synthetic: true;
-  operational: false;
+  kind: 'offline-agent-decision' | 'action-agent-decision';
+  synthetic: boolean;
+  operational: boolean;
   decision: GateDecision;
 }
 
@@ -242,7 +246,7 @@ function isIdentityShape(value: unknown): value is ReviewIdentity {
     && typeof value.runId === 'string' && SAFE_ID_PATTERN.test(value.runId);
 }
 
-export function validateAgentRequest(input: unknown): AgentReviewRequest {
+function validateRequestShape(input: unknown, expected: 'offline' | 'action'): AgentReviewRequest {
   check(isObject(input), 'request is not an object');
   check(
     hasKeys(input, [
@@ -254,9 +258,10 @@ export function validateAgentRequest(input: unknown): AgentReviewRequest {
   );
   check(input.schemaVersion === 1, 'request schemaVersion must be 1');
   check(input.kind === 'agent-review', 'request kind must be agent-review');
-  check(input.mode === 'offline', 'request mode must be offline');
-  check(input.synthetic === true, 'request synthetic must be true');
-  check(input.operational === false, 'request operational must be false');
+  check(input.mode === expected, `request mode must be ${expected}`);
+  const synthetic = expected === 'offline';
+  check(input.synthetic === synthetic, `request synthetic must be ${synthetic}`);
+  check(input.operational === !synthetic, `request operational must be ${!synthetic}`);
   check(isSha(input.reviewSystemSha), 'request reviewSystemSha must be a 40-char SHA');
   check(
     typeof input.priorStateVersion === 'string' && SAFE_ID_PATTERN.test(input.priorStateVersion),
@@ -282,6 +287,14 @@ export function validateAgentRequest(input: unknown): AgentReviewRequest {
   check(typeof input.complete === 'boolean', 'request complete must be boolean');
   check(isStringArray(input.limitations), 'request limitations must be a string array');
   return input as unknown as AgentReviewRequest;
+}
+
+export function validateAgentRequest(input: unknown): AgentReviewRequest {
+  return validateRequestShape(input, 'offline');
+}
+
+export function validateActionRequest(input: unknown): AgentReviewRequest {
+  return validateRequestShape(input, 'action');
 }
 
 export function agentPolicyDigest(packetDigest: string, files: Map<string, Buffer>): string {

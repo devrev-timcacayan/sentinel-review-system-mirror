@@ -1,0 +1,270 @@
+name: Claude Code Review
+
+# Staging POC only. This runs trusted base-branch workflow code, never PR scripts.
+on:
+  pull_request_target:
+    branches: [staging]
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions: {}
+
+concurrency:
+  group: sentinel-canonical-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  REVIEW_SYSTEM_SHA: ${{ vars.SENTINEL_REVIEW_SYSTEM_SHA }}
+  SENTINEL_REVIEW_POC_APPROVED_PR: ${{ vars.SENTINEL_REVIEW_POC_APPROVED_PR }}
+  SENTINEL_REVIEW_CONTROLS_VERIFIED: ${{ vars.SENTINEL_REVIEW_CONTROLS_VERIFIED }}
+  SENTINEL_REVIEW_MAX_USD: ${{ vars.SENTINEL_REVIEW_MAX_USD }}
+  SENTINEL_REVIEW_MAX_TURNS: ${{ vars.SENTINEL_REVIEW_MAX_TURNS }}
+  SENTINEL_REVIEW_TIMEOUT_MINUTES: ${{ vars.SENTINEL_REVIEW_TIMEOUT_MINUTES }}
+  SENTINEL_REVIEW_MAX_FILES: ${{ vars.SENTINEL_REVIEW_MAX_FILES }}
+  SENTINEL_REVIEW_MAX_SOURCE_BYTES: ${{ vars.SENTINEL_REVIEW_MAX_SOURCE_BYTES }}
+  SENTINEL_REVIEW_MAX_READ_BYTES: ${{ vars.SENTINEL_REVIEW_MAX_READ_BYTES }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+      actions: read
+    outputs:
+      timeout_minutes: ${{ steps.prepare.outputs.timeout_minutes }}
+    steps:
+      - name: Require a pinned canonical reviewer and private checkout access
+        env:
+          READ_TOKEN_PRESENT: ${{ secrets.SENTINEL_REVIEW_SYSTEM_READ_TOKEN != '' }}
+        run: |
+          node -e 'if (!/^[0-9a-f]{40}$/.test(process.env.REVIEW_SYSTEM_SHA || "") || process.env.READ_TOKEN_PRESENT !== "true") { throw new Error("Configure the approved reviewer commit and read-only private checkout token first."); }'
+
+      - name: Checkout trusted Sentinel base and Git history
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout pinned canonical reviewer
+        uses: actions/checkout@v6
+        with:
+          repository: devrev/sentinel-review-system
+          ref: ${{ env.REVIEW_SYSTEM_SHA }}
+          token: ${{ secrets.SENTINEL_REVIEW_SYSTEM_READ_TOKEN }}
+          path: review-system
+          persist-credentials: false
+
+      - name: Checkout existing operational state branch
+        uses: actions/checkout@v6
+        with:
+          ref: sentinel-review-state
+          path: review-state
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18.0"
+
+      - name: Install only trusted reviewer dependencies
+        working-directory: review-system
+        run: npm ci --ignore-scripts
+
+      - name: Prepare canonical review and reserve prior-finding state
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --experimental-strip-types review-system/src/cli.ts action-host reserve \
+            --source-checkout "$GITHUB_WORKSPACE" \
+            --state-checkout "$GITHUB_WORKSPACE/review-state" \
+            --out "$RUNNER_TEMP/prepared"
+
+      - name: Preserve this run's trusted inputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: canonical-inputs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/prepared
+          if-no-files-found: error
+
+  investigate:
+    if: ${{ needs.prepare.result == 'success' }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    # The fallback is only for a skipped job after failed preparation, never a run limit.
+    timeout-minutes: ${{ fromJSON(needs.prepare.outputs.timeout_minutes || '1') }}
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/checkout@v6
+        with:
+          repository: devrev/sentinel-review-system
+          ref: ${{ env.REVIEW_SYSTEM_SHA }}
+          token: ${{ secrets.SENTINEL_REVIEW_SYSTEM_READ_TOKEN }}
+          path: review-system
+          persist-credentials: false
+
+      - uses: actions/checkout@v6
+        with:
+          ref: sentinel-review-state
+          path: review-state
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18.0"
+
+      - name: Install only trusted reviewer dependencies
+        working-directory: review-system
+        run: npm ci --ignore-scripts
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: canonical-inputs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/prepared
+
+      - name: Recheck identity and state before model credentials
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --experimental-strip-types review-system/src/cli.ts action-host check \
+            --source-checkout "$GITHUB_WORKSPACE" \
+            --state-checkout "$GITHUB_WORKSPACE/review-state" \
+            --prepared "$RUNNER_TEMP/prepared"
+
+      - name: Prepare immutable source views and canonical action inputs
+        id: inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --experimental-strip-types review-system/src/cli.ts action-host materialize \
+            --source-checkout "$GITHUB_WORKSPACE" \
+            --prepared "$RUNNER_TEMP/prepared" \
+            --out "$GITHUB_WORKSPACE/review-source"
+
+      - name: Configure AWS credentials for this invocation only
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.CLAUDE_AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Execute the canonical Sentinel procedure
+        id: claude
+        continue-on-error: true
+        uses: anthropics/claude-code-action@1d6de8cb0c237e7c15e9e1bdf973826ebae490cc
+        with:
+          use_bedrock: true
+          github_token: ${{ github.token }}
+          track_progress: false
+          use_sticky_comment: false
+          display_report: false
+          show_full_output: false
+          prompt: ${{ steps.inputs.outputs.prompt }}
+          claude_args: ${{ steps.inputs.outputs.claude_args }}
+          settings: ${{ steps.inputs.outputs.settings }}
+
+      - name: Capture only this action invocation's outputs
+        if: ${{ always() }}
+        env:
+          ACTION_OUTCOME: ${{ steps.claude.outcome }}
+          ACTION_CONCLUSION: ${{ steps.claude.outputs.conclusion }}
+          ACTION_SESSION_ID: ${{ steps.claude.outputs.session_id }}
+          ACTION_STRUCTURED_OUTPUT: ${{ steps.claude.outputs.structured_output }}
+          ACTION_EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+        run: |
+          node --experimental-strip-types review-system/src/cli.ts action-host capture \
+            --out "$RUNNER_TEMP/action-result"
+
+      - name: Preserve raw execution evidence for trusted validation
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: canonical-execution-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/action-result
+          if-no-files-found: error
+
+  claude-auto-review:
+    if: ${{ always() }}
+    needs: [prepare, investigate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+    steps:
+      - name: Require the canonical reviewer pin
+        run: |
+          node -e 'if (!/^[0-9a-f]{40}$/.test(process.env.REVIEW_SYSTEM_SHA || "")) { throw new Error("Missing canonical reviewer commit; review cannot pass."); }'
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/checkout@v6
+        with:
+          repository: devrev/sentinel-review-system
+          ref: ${{ env.REVIEW_SYSTEM_SHA }}
+          token: ${{ secrets.SENTINEL_REVIEW_SYSTEM_READ_TOKEN }}
+          path: review-system
+          persist-credentials: false
+
+      - uses: actions/checkout@v6
+        with:
+          ref: sentinel-review-state
+          path: review-state
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18.0"
+
+      - name: Install only trusted reviewer dependencies
+        working-directory: review-system
+        run: npm ci --ignore-scripts
+
+      - name: Load only this run's prepared inputs
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: canonical-inputs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/prepared
+
+      - name: Load only this run's execution evidence
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: canonical-execution-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/action-result
+
+      - name: Validate, persist, publish, and enforce the canonical decision
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --experimental-strip-types review-system/src/cli.ts action-host finalize \
+            --source-checkout "$GITHUB_WORKSPACE" \
+            --state-checkout "$GITHUB_WORKSPACE/review-state" \
+            --prepared "$RUNNER_TEMP/prepared" \
+            --result "$RUNNER_TEMP/action-result" \
+            --out "$RUNNER_TEMP/validated"
+
+      - name: Preserve validation evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: canonical-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/validated
+          if-no-files-found: ignore

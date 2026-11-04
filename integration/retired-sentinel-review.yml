@@ -1,0 +1,17 @@
+name: sentinel-review (retired)
+
+# The canonical Claude Code Review workflow is the only staging review executor.
+# Retained as an explicit retirement notice, not an alternate paid execution path.
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  retired:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse the retired packet runner
+        run: |
+          echo "Retired: use claude-code-review.yml and the canonical sentinel-review-system integration."
+          exit 1

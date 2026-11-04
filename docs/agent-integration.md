@@ -14,7 +14,7 @@ See [the capability check](claude-action-capability-check.md) for the inspected 
 
 ## 2. Two review entry points
 
-Proposed CLI names are `prepare-agent` and `validate-agent`. They are not existing commands. Existing `prepare`, `prepare-bundle`, `review`, and `record` behavior remains unchanged until an explicitly reviewed implementation replaces or extends it.
+The contract below originally proposed `prepare-agent` and `validate-agent`; they now exist as offline-only commands, described in "Current implementation" at the end. The [action-backed adapter](actions-integration.md) has separate activation prerequisites. Existing `prepare`, `prepare-bundle`, `review`, and `record` behavior remains unchanged.
 
 ### prepare-agent
 

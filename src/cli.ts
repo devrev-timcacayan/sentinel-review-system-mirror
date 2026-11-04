@@ -11,6 +11,7 @@ import { projectPartition } from './partitionContract.ts';
 import { defaultStateRoot, migrateLegacyJournal, prStore, readLedger, recordReview, withPrLock } from './state.ts';
 import { prepareRetrospective, validateCloseEvent } from './retrospective.ts';
 import { commandPrepareAgent, commandValidateAgent } from './agentCli.ts';
+import { realHostDeps, runActionHost, HostInputError } from './actionHost.ts';
 import type { PartitionManifest, ReviewLedger, ReviewSnapshot } from './contracts.ts';
 
 const USAGE = `sentinel-review-system (local shadow-mode POC)
@@ -23,6 +24,7 @@ Usage:
   cli journal-migrate --repository OWNER/REPO --pr N [--state-root PATH] [--system-root PATH]
   cli prepare-agent --offline true --checkout PATH --repository OWNER/REPO --pr N --base REF --head REF --run-id ID --review-system-sha SHA --prior-state FILE --validation-limits FILE --out DIR [--system-root PATH]
   cli validate-agent --offline true --checkout PATH --request FILE --report FILE --execution FILE --current FILE --prior-state FILE --out DIR [--system-root PATH]
+  cli action-host <reserve|check|materialize|capture|finalize> [stage flags]
   cli --help
 
 prepare-bundle captures the full source set without the maxFiles entry cap (total byte cap unchanged),
@@ -309,7 +311,35 @@ function commandRetrospective(args: string[]): number {
   return 0;
 }
 
-export function runCli(argv: string[]): number {
+const ACTION_HOST_FLAGS = ['source-checkout', 'state-checkout', 'prepared', 'result', 'out', 'system-root'];
+
+async function commandActionHost(args: string[]): Promise<number> {
+  const [stage, ...rest] = args;
+  const options: Record<string, string> = {};
+  let index = 0;
+  while (index < rest.length) {
+    const token = rest[index];
+    if (!token.startsWith('--')) throw new UsageError(`Unexpected positional argument: ${token}`);
+    const eq = token.indexOf('=');
+    const name = token.slice(2, eq < 0 ? undefined : eq);
+    if (!ACTION_HOST_FLAGS.includes(name)) throw new UsageError(`Unknown option: --${name}`);
+    const value = eq >= 0 ? token.slice(eq + 1) : rest[++index];
+    if (value === undefined || value.startsWith('--')) throw new UsageError(`Missing value for --${name}`);
+    const key = name.replace(/-([a-z])/g, (_match: string, letter: string): string => letter.toUpperCase());
+    if (options[key] !== undefined) throw new UsageError(`Duplicate option: --${name}`);
+    options[key] = value;
+    index += 1;
+  }
+  if (stage === undefined || stage.length === 0) throw new UsageError('Missing action-host stage');
+  try {
+    return await runActionHost(stage, options, realHostDeps());
+  } catch (error) {
+    if (error instanceof HostInputError) throw new UsageError(error.message);
+    throw error;
+  }
+}
+
+export function runCli(argv: string[]): number | Promise<number> {
   const [command, ...rest] = argv;
   try {
     if (command === '--help' || command === '-h' || command === 'help') {
@@ -323,6 +353,7 @@ export function runCli(argv: string[]): number {
     if (command === 'journal-migrate') return commandJournalMigrate(rest);
     if (command === 'prepare-agent') return commandPrepareAgent(rest);
     if (command === 'validate-agent') return commandValidateAgent(rest);
+    if (command === 'action-host') return commandActionHost(rest);
     throw new UsageError(`Unknown command: ${String(command)}\n\n${USAGE}`);
   } catch (error) {
     if (error instanceof UsageError) {
@@ -336,5 +367,16 @@ export function runCli(argv: string[]): number {
 
 const invokedAs = process.argv[1] ? path.resolve(process.argv[1]) : '';
 if (invokedAs === fileURLToPath(import.meta.url)) {
-  process.exitCode = runCli(process.argv.slice(2));
+  const result = runCli(process.argv.slice(2));
+  if (result instanceof Promise) {
+    result.then(
+      (code: number): void => { process.exitCode = code; },
+      (error: unknown): void => {
+        console.error(`error: ${(error as Error).message}`);
+        process.exitCode = 1;
+      },
+    );
+  } else {
+    process.exitCode = result;
+  }
 }
