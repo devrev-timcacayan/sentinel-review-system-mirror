@@ -37,9 +37,9 @@ jobs:
     steps:
       - name: Require a pinned canonical reviewer and private checkout access
         env:
-          READ_TOKEN_PRESENT: ${{ secrets.CLAUDE_REVIEW_PAT != '' }}
+          READ_TOKEN_PRESENT: ${{ secrets.SENTINEL_REVIEW_SYSTEM_READ_TOKEN != '' }}
         run: |
-          node -e 'if (!/^[0-9a-f]{40}$/.test(process.env.REVIEW_SYSTEM_SHA || "") || process.env.READ_TOKEN_PRESENT !== "true") { throw new Error("The existing CLAUDE_REVIEW_PAT needs read access to the review repository."); }'
+          node -e 'if (!/^[0-9a-f]{40}$/.test(process.env.REVIEW_SYSTEM_SHA || "") || process.env.READ_TOKEN_PRESENT !== "true") { throw new Error("The SENTINEL_REVIEW_SYSTEM_READ_TOKEN secret needs read access to the review repository."); }'
 
       - name: Checkout trusted Sentinel base and Git history
         uses: actions/checkout@v6
@@ -53,7 +53,7 @@ jobs:
         with:
           repository: devrev/sentinel-review-system
           ref: ${{ env.REVIEW_SYSTEM_SHA }}
-          token: ${{ secrets.CLAUDE_REVIEW_PAT }}
+          token: ${{ secrets.SENTINEL_REVIEW_SYSTEM_READ_TOKEN }}
           path: review-system
           persist-credentials: false
 
@@ -118,7 +118,7 @@ jobs:
         with:
           repository: devrev/sentinel-review-system
           ref: ${{ env.REVIEW_SYSTEM_SHA }}
-          token: ${{ secrets.CLAUDE_REVIEW_PAT }}
+          token: ${{ secrets.SENTINEL_REVIEW_SYSTEM_READ_TOKEN }}
           path: review-system
           persist-credentials: false
 
@@ -226,7 +226,7 @@ jobs:
         with:
           repository: devrev/sentinel-review-system
           ref: ${{ env.REVIEW_SYSTEM_SHA }}
-          token: ${{ secrets.CLAUDE_REVIEW_PAT }}
+          token: ${{ secrets.SENTINEL_REVIEW_SYSTEM_READ_TOKEN }}
           path: review-system
           persist-credentials: false
 

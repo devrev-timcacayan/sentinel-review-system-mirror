@@ -17,8 +17,9 @@ run:
   probe job, no `pull_request_target` trigger on this staging template.
 - `REVIEW_SYSTEM_SHA` is pinned literally in the workflow to commit
   `2c803767dd7a441d4bf77f5c0bd6f6088f85c0d7`; no variable substitution.
-- The existing `CLAUDE_REVIEW_PAT` secret must have read access to the review
-  repository; no new secrets were created.
+- The dedicated `SENTINEL_REVIEW_SYSTEM_READ_TOKEN` secret is used for the
+  reviewer checkouts and must have read access to the review repository;
+  live access is unverified until a real run proves it.
 - Fixed limits: 15-minute timeout, 200 files, 4,000,000 source bytes, 200,000
   per-read bytes. There are no USD or turn caps on the manual path; recorded
   usage remains evidence for later refinement. Nothing else needs

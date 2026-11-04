@@ -326,8 +326,8 @@ test('manual dispatch workflow exposes one PR input and the canonical guards', (
   assert.match(template, /workflow_dispatch:\s*\n\s+inputs:\s*\n\s+pr_number:\s*\n\s+description: 'PR number to review'\s*\n\s+type: string\s*\n\s+required: true\s*\n\s+default: '529'/);
   assert.match(template, /REVIEW_SYSTEM_SHA: '2c803767dd7a441d4bf77f5c0bd6f6088f85c0d7'/);
   assert.doesNotMatch(template, /SENTINEL_REVIEW_MAX_USD|SENTINEL_REVIEW_MAX_TURNS/);
-  assert.match(template, /secrets\.CLAUDE_REVIEW_PAT/);
-  assert.doesNotMatch(template, /SENTINEL_REVIEW_POC_APPROVED_PR|SENTINEL_REVIEW_CONTROLS_VERIFIED|SENTINEL_REVIEW_SYSTEM_READ_TOKEN/);
+  assert.match(template, /secrets\.SENTINEL_REVIEW_SYSTEM_READ_TOKEN/);
+  assert.doesNotMatch(template, /SENTINEL_REVIEW_POC_APPROVED_PR|SENTINEL_REVIEW_CONTROLS_VERIFIED|CLAUDE_REVIEW_PAT/);
   assert.equal(template.match(/ref: \$\{\{ github\.sha \}\}/g)?.length, 3);
   const actionUses = template.match(/uses:\s*anthropics\/claude-code-action@/g) ?? [];
   assert.equal(actionUses.length, 1);
