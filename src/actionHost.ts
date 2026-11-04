@@ -90,11 +90,10 @@ interface HostContext {
   runId: string;
 }
 
-function verifyEnvironment(deps: HostDeps): HostContext {
+async function verifyEnvironment(deps: HostDeps): Promise<HostContext> {
   const env = deps.env;
   require(env.GITHUB_ACTIONS === 'true', 'action-host must run under GitHub Actions');
   require(env.GITHUB_REPOSITORY === REPOSITORY, `unexpected repository ${env.GITHUB_REPOSITORY ?? ''}`);
-  require(env.GITHUB_EVENT_NAME === 'pull_request_target', 'action-host requires pull_request_target');
   require(/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ID ?? ''), 'GITHUB_RUN_ID must be a positive decimal');
   require(/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ATTEMPT ?? ''), 'GITHUB_RUN_ATTEMPT must be a positive decimal');
   const eventPath = env.GITHUB_EVENT_PATH ?? '';
@@ -104,20 +103,65 @@ function verifyEnvironment(deps: HostDeps): HostContext {
   } catch (error) {
     throw new HostInputError(`Cannot read event payload: ${(error as Error).message}`);
   }
-  require(object(event) && object(event.pull_request), 'event payload lacks pull_request');
-  const pr = event.pull_request;
-  require(Number.isSafeInteger(pr.number) && Number(pr.number) > 0, 'event pull_request.number invalid');
-  require(object(pr.base) && pr.base.ref === 'staging', 'event base must target staging');
-  require(object(pr.base) && typeof pr.base.sha === 'string' && SHA_PATTERN.test(pr.base.sha), 'event base.sha invalid');
-  require(object(pr.head) && typeof pr.head.sha === 'string' && SHA_PATTERN.test(pr.head.sha), 'event head.sha invalid');
-  require(object(pr.head) && object(pr.head.repo) && pr.head.repo.full_name === REPOSITORY, 'event head must come from devrev/sentinel');
-  require(typeof pr.title === 'string' && TITLE_PATTERN.test(pr.title), 'PR title is not an approved POC test title');
+  if (env.GITHUB_EVENT_NAME === 'pull_request_target') {
+    require(object(event) && object(event.pull_request), 'event payload lacks pull_request');
+    const pr = event.pull_request;
+    require(Number.isSafeInteger(pr.number) && Number(pr.number) > 0, 'event pull_request.number invalid');
+    require(object(pr.base) && pr.base.ref === 'staging', 'event base must target staging');
+    require(object(pr.base) && typeof pr.base.sha === 'string' && SHA_PATTERN.test(pr.base.sha), 'event base.sha invalid');
+    require(object(pr.head) && typeof pr.head.sha === 'string' && SHA_PATTERN.test(pr.head.sha), 'event head.sha invalid');
+    require(object(pr.head) && object(pr.head.repo) && pr.head.repo.full_name === REPOSITORY, 'event head must come from devrev/sentinel');
+    require(typeof pr.title === 'string' && TITLE_PATTERN.test(pr.title), 'PR title is not an approved POC test title');
+    return {
+      pullRequest: Number(pr.number),
+      title: pr.title as string,
+      body: typeof pr.body === 'string' ? pr.body : null,
+      baseSha: pr.base.sha as string,
+      headSha: pr.head.sha as string,
+      runId: `gha-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`,
+    };
+  }
+  require(env.GITHUB_EVENT_NAME === 'workflow_dispatch', 'action-host requires pull_request_target or workflow_dispatch');
+  require(env.GITHUB_REF === 'refs/heads/staging', 'dispatch must run on the staging ref');
+  require(env.GITHUB_WORKFLOW_REF === `${REPOSITORY}/.github/workflows/claude-code-review.yml@refs/heads/staging`,
+    'dispatch must come from the canonical staging workflow');
+  require(typeof env.GITHUB_SHA === 'string' && SHA_PATTERN.test(env.GITHUB_SHA), 'GITHUB_SHA must be a 40-char SHA');
+  require(object(event) && object(event.inputs), 'dispatch event lacks inputs');
+  const inputs = event.inputs;
+  require(
+    Object.keys(inputs).sort().join(',') === 'base_sha,head_sha,mode,pr_number',
+    'dispatch inputs must be exactly mode, pr_number, base_sha, head_sha',
+  );
+  require(inputs.mode === 'review', 'dispatch mode must be review for review jobs');
+  require(
+    typeof inputs.pr_number === 'string' && /^[1-9][0-9]*$/.test(inputs.pr_number)
+    && Number.isSafeInteger(Number(inputs.pr_number)) && String(Number(inputs.pr_number)) === inputs.pr_number,
+    'dispatch pr_number must be a canonical positive decimal',
+  );
+  require(
+    typeof inputs.base_sha === 'string' && SHA_PATTERN.test(inputs.base_sha)
+    && typeof inputs.head_sha === 'string' && SHA_PATTERN.test(inputs.head_sha),
+    'dispatch base_sha/head_sha must be lowercase 40-char SHAs',
+  );
+  require(inputs.base_sha === env.GITHUB_SHA, 'dispatch base_sha must equal the dispatched staging commit');
+  const pullRequest = Number(inputs.pr_number);
+  require(env.SENTINEL_REVIEW_POC_APPROVED_PR === String(pullRequest), 'dispatch PR is not the approved POC PR');
+  const response = await deps.http({ method: 'GET', path: `/repos/${REPOSITORY}/pulls/${String(pullRequest)}` });
+  require(response.status === 200, `pull request lookup failed with status ${response.status}`);
+  const pull = response.json;
+  require(object(pull) && pull.number === pullRequest, 'pull lookup returned a different PR');
+  require(pull.state === 'open', 'pull request is not open');
+  require(object(pull.base) && pull.base.ref === 'staging', 'pull base is not staging');
+  require(object(pull.base) && pull.base.sha === inputs.base_sha, 'pull base SHA is stale against dispatch inputs');
+  require(object(pull.head) && pull.head.sha === inputs.head_sha, 'pull head SHA is stale against dispatch inputs');
+  require(object(pull.head) && object(pull.head.repo) && pull.head.repo.full_name === REPOSITORY, 'pull head repository mismatch');
+  require(typeof pull.title === 'string' && TITLE_PATTERN.test(pull.title), 'PR title is not an approved POC test title');
   return {
-    pullRequest: Number(pr.number),
-    title: pr.title as string,
-    body: typeof pr.body === 'string' ? pr.body : null,
-    baseSha: pr.base.sha as string,
-    headSha: pr.head.sha as string,
+    pullRequest,
+    title: pull.title as string,
+    body: typeof pull.body === 'string' ? pull.body : null,
+    baseSha: pull.base.sha as string,
+    headSha: pull.head.sha as string,
     runId: `gha-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`,
   };
 }
@@ -150,8 +194,15 @@ async function verifyRun(deps: HostDeps): Promise<void> {
   const run = response.json;
   require(object(run) && run.id === Number(env.GITHUB_RUN_ID), 'workflow run id mismatch');
   require(run.run_attempt === Number(env.GITHUB_RUN_ATTEMPT), 'workflow run attempt mismatch');
-  require(run.event === 'pull_request_target', 'workflow run event mismatch');
+  require(run.event === env.GITHUB_EVENT_NAME, 'workflow run event mismatch');
   require(typeof run.path === 'string' && run.path.split('@')[0] === WORKFLOW_PATH, 'workflow run is not the review workflow');
+  if (env.GITHUB_EVENT_NAME === 'workflow_dispatch') {
+    require(run.head_branch === 'staging', 'dispatch run must execute on the staging branch');
+    require(run.head_sha === env.GITHUB_SHA, 'dispatch run must execute the dispatched staging commit');
+  }
+  if (env.GITHUB_WORKFLOW_SHA !== undefined) {
+    require(env.GITHUB_WORKFLOW_SHA === env.GITHUB_SHA, 'workflow ref SHA differs from the dispatched commit');
+  }
 }
 
 function githubOutput(deps: HostDeps, entries: Record<string, string>): void {
@@ -259,7 +310,7 @@ function requirePreparedContext(hostContext: Record<string, unknown>, ctx: HostC
 }
 
 async function stageReserve(deps: HostDeps, options: Record<string, string>): Promise<number> {
-  const ctx = verifyEnvironment(deps);
+  const ctx = await verifyEnvironment(deps);
   const systemRoot = path.resolve(options.systemRoot ?? defaultSystemRoot());
   const pin = verifyPin(deps, systemRoot);
   const controls = readActionControls(deps.env, ctx.pullRequest);
@@ -343,7 +394,7 @@ async function stageReserve(deps: HostDeps, options: Record<string, string>): Pr
 }
 
 async function stageCheck(deps: HostDeps, options: Record<string, string>): Promise<number> {
-  const ctx = verifyEnvironment(deps);
+  const ctx = await verifyEnvironment(deps);
   const systemRoot = path.resolve(options.systemRoot ?? defaultSystemRoot());
   const pin = verifyPin(deps, systemRoot);
   const controls = readActionControls(deps.env, ctx.pullRequest);
@@ -366,10 +417,11 @@ async function stageCheck(deps: HostDeps, options: Record<string, string>): Prom
 }
 
 async function stageMaterialize(deps: HostDeps, options: Record<string, string>): Promise<number> {
-  const ctx = verifyEnvironment(deps);
+  const ctx = await verifyEnvironment(deps);
   const systemRoot = path.resolve(options.systemRoot ?? defaultSystemRoot());
   const pin = verifyPin(deps, systemRoot);
   const controls = readActionControls(deps.env, ctx.pullRequest);
+  await verifyRun(deps);
   const loaded = loadPolicy(systemRoot);
   const { request, hostContext, instructions, schema } = loadPrepared(options.prepared, systemRoot);
   require(request.identity.runId === ctx.runId, 'prepared request runId mismatch');
@@ -512,8 +564,51 @@ function renderSummary(decision: GateDecision, runId: string): string {
   return `${lines.join('\n')}\n`;
 }
 
+const STATUS_CONTEXT = 'sentinel-canonical-review';
+
+async function postCommitStatus(deps: HostDeps, headSha: string, state: 'pending' | 'success' | 'failure' | 'error', description: string): Promise<void> {
+  const response = await deps.http({
+    method: 'POST',
+    path: `/repos/${REPOSITORY}/statuses/${headSha}`,
+    body: {
+      state,
+      description,
+      context: STATUS_CONTEXT,
+      target_url: `https://github.com/devrev/sentinel/actions/runs/${deps.env.GITHUB_RUN_ID}`,
+    },
+  });
+  require(response.status >= 200 && response.status < 300, `commit status publication failed with status ${response.status}`);
+}
+
+// Status stages write only pending/error and must work even when paid
+// controls are unconfigured, but they still require the approved PR and live
+// verified identity before any status mutation.
+async function verifyStatusAuthorization(deps: HostDeps, options: Record<string, string>): Promise<HostContext> {
+  const ctx = await verifyEnvironment(deps);
+  require(deps.env.SENTINEL_REVIEW_POC_APPROVED_PR === String(ctx.pullRequest), 'status stage PR is not the approved POC PR');
+  const systemRoot = path.resolve(options.systemRoot ?? defaultSystemRoot());
+  verifyPin(deps, systemRoot);
+  await verifyRun(deps);
+  await verifyPull(deps, ctx.pullRequest, { baseSha: ctx.baseSha, headSha: ctx.headSha });
+  return ctx;
+}
+
+async function stageStartStatus(deps: HostDeps, options: Record<string, string>): Promise<number> {
+  const ctx = await verifyStatusAuthorization(deps, options);
+  await postCommitStatus(deps, ctx.headSha, 'pending', 'Sentinel canonical review is pending on this exact head.');
+  console.log(JSON.stringify({ status: 'pending', headSha: ctx.headSha }));
+  return 0;
+}
+
+async function stageFailStatus(deps: HostDeps, options: Record<string, string>): Promise<number> {
+  const ctx = await verifyStatusAuthorization(deps, options);
+  await postCommitStatus(deps, ctx.headSha, 'error', 'Sentinel canonical review could not complete on this head.');
+  console.log(JSON.stringify({ status: 'error', headSha: ctx.headSha }));
+  return 0;
+}
+
 async function stageFinalize(deps: HostDeps, options: Record<string, string>): Promise<number> {
-  const ctx = verifyEnvironment(deps);
+  const ctx = await verifyEnvironment(deps);
   const systemRoot = path.resolve(options.systemRoot ?? defaultSystemRoot());
   const pin = verifyPin(deps, systemRoot);
   const controls = readActionControls(deps.env, ctx.pullRequest);
@@ -638,6 +733,9 @@ async function stageFinalize(deps: HostDeps, options: Record<string, string>): P
     body: { body: renderSummary(decision, ctx.runId) },
   });
   require(publish.status >= 200 && publish.status < 300, `comment publication failed with status ${publish.status}`);
+  const statusState = decision.status === 'pass' ? 'success' : decision.status === 'changes_required' ? 'failure' : 'error';
+  await postCommitStatus(deps, ctx.headSha, statusState, `Sentinel canonical review: ${decision.status}.`);
+  githubOutput(deps, { canonical_decision: decision.status });
   console.log(JSON.stringify({ status: decision.status }));
   if (decision.status === 'pass') return 0;
   if (decision.status === 'changes_required') return 2;
@@ -645,6 +743,8 @@ async function stageFinalize(deps: HostDeps, options: Record<string, string>): P
 }
 
 export async function runActionHost(stage: string, options: Record<string, string>, deps: HostDeps): Promise<number> {
+  if (stage === 'start-status') return stageStartStatus(deps, options);
+  if (stage === 'fail-status') return stageFailStatus(deps, options);
   if (stage === 'reserve') return stageReserve(deps, options);
   if (stage === 'check') return stageCheck(deps, options);
   if (stage === 'materialize') return stageMaterialize(deps, options);

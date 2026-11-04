@@ -71,6 +71,7 @@ function makeRig(): Rig {
     return '';
   };
   const http = (request: HttpRequest): HttpResponse => {
+    if (request.path.startsWith('/repos/devrev/sentinel/statuses/')) return { status: 201, json: {} };
     if (request.method === 'POST') { posts.push(request); return { status: 201, json: { id: 1 } }; }
     if (request.path.startsWith('/repos/devrev/sentinel/pulls/')) {
       return { status: 200, json: { number: 17, state: 'open', base: { ref: 'staging', sha: baseSha }, head: { sha: headSha, repo: { full_name: REPO } } } };
@@ -334,4 +335,262 @@ test('push races prevent publication and publication failure never becomes a suc
       assert.equal(record.status, 'pass', 'a saved decision does not substitute for the failed required check');
     }
   }
+});
+
+interface DispatchRig extends Rig {
+  statuses: { state: string; sha: string; body: Record<string, unknown> }[];
+}
+
+interface DispatchOverrides {
+  env?: NodeJS.ProcessEnv;
+  inputs?: Record<string, unknown>;
+  pull?: Record<string, unknown>;
+  run?: Record<string, unknown>;
+}
+
+function makeDispatchRig(overrides: DispatchOverrides = {}): DispatchRig {
+  const rig = makeRig() as DispatchRig;
+  rig.statuses = [];
+  const { baseSha, headSha } = rig.source;
+  const inputs: Record<string, unknown> = { mode: 'review', pr_number: '17', base_sha: baseSha, head_sha: headSha, ...(overrides.inputs ?? {}) };
+  const eventPath = path.join(mkdtempSync(path.join(tmpdir(), 'srs-disp-')), 'event.json');
+  writeFileSync(eventPath, JSON.stringify({ inputs }));
+  rig.env = {
+    ...rig.env,
+    GITHUB_EVENT_NAME: 'workflow_dispatch',
+    GITHUB_REF: 'refs/heads/staging',
+    GITHUB_SHA: baseSha,
+    GITHUB_WORKFLOW_REF: 'devrev/sentinel/.github/workflows/claude-code-review.yml@refs/heads/staging',
+    GITHUB_EVENT_PATH: eventPath,
+    GITHUB_OUTPUT: path.join(mkdtempSync(path.join(tmpdir(), 'srs-out-')), 'out.txt'),
+    ...(overrides.env ?? {}),
+  };
+  const pull = { number: 17, state: 'open', title: 'POC Test: dispatch-DO NOT REVIEW', body: null, base: { ref: 'staging', sha: baseSha }, head: { sha: headSha, repo: { full_name: REPO } }, ...(overrides.pull ?? {}) };
+  const run = { id: 7, run_attempt: 3, event: 'workflow_dispatch', path: '.github/workflows/claude-code-review.yml@refs/heads/staging', head_branch: 'staging', head_sha: baseSha, ...(overrides.run ?? {}) };
+  rig.deps = {
+    env: rig.env,
+    git: rig.deps.git,
+    http: (request: HttpRequest): HttpResponse => {
+      if (request.path.startsWith('/repos/devrev/sentinel/statuses/')) {
+        rig.statuses.push({ state: String((request.body as { state: string }).state), sha: request.path.split('/statuses/')[1], body: request.body as Record<string, unknown> });
+        return { status: 201, json: {} };
+      }
+      if (request.method === 'POST') { rig.posts.push(request); return { status: 201, json: { id: 1 } }; }
+      if (request.path.startsWith('/repos/devrev/sentinel/pulls/')) return { status: 200, json: pull };
+      return { status: 200, json: run };
+    },
+    systemIntegrity: () => ({ headSha: PIN, pristine: true }),
+  };
+  return rig;
+}
+
+function dispatchOptions(rig: DispatchRig): Record<string, string> {
+  return { sourceCheckout: rig.source.repo.dir, stateCheckout: rig.stateDir, systemRoot: SYSTEM_ROOT };
+}
+
+function captureResult(rig: Rig, report: unknown): string {
+  const runnerTemp = mkdtempSync(path.join(tmpdir(), 'srs-runner-'));
+  const model = loadTestPolicy().policy.model;
+  const reportText = JSON.stringify(report);
+  writeFileSync(path.join(runnerTemp, 'trace.json'), JSON.stringify([
+    { type: 'system', subtype: 'init', session_id: 'session-1', model },
+    { type: 'result', subtype: 'success', is_error: false, session_id: 'session-1', permission_denials: [], modelUsage: { [model]: {} }, num_turns: 2, total_cost_usd: 0.25, duration_ms: 1000, structured_output: report },
+  ]));
+  const capOut = path.join(mkdtempSync(path.join(tmpdir(), 'srs-capdir-')), 'capture');
+  const deps = { ...rig.deps, env: { ...rig.env, ACTION_OUTCOME: 'success', ACTION_CONCLUSION: 'success', ACTION_SESSION_ID: 'session-1', ACTION_STRUCTURED_OUTPUT: reportText, ACTION_EXECUTION_FILE: path.join(runnerTemp, 'trace.json'), RUNNER_TEMP: runnerTemp } };
+  return `${capOut}`;
+}
+
+test('dispatch review runs the full pipeline including capture and posts status on the exact PR head', async (): Promise<void> => {
+  const rig = makeDispatchRig();
+  const opts = dispatchOptions(rig);
+  assert.equal(await runActionHost('start-status', opts, rig.deps), 0);
+  assert.deepEqual(rig.statuses.map((s) => s.state), ['pending']);
+  assert.equal(rig.statuses[0].sha, rig.source.headSha);
+  assert.notEqual(rig.source.headSha, rig.env.GITHUB_SHA, 'status must target PR head, not workflow SHA');
+  assert.equal(rig.statuses[0].body.context, 'sentinel-canonical-review');
+  assert.match(String(rig.statuses[0].body.target_url), /actions\/runs\/7$/);
+  assert.equal(await runActionHost('reserve', { ...opts, out: rig.preparedDir }, rig.deps), 0);
+  assert.equal(await runActionHost('check', { ...opts, prepared: rig.preparedDir }, rig.deps), 0);
+  assert.equal(await runActionHost('materialize', { sourceCheckout: rig.source.repo.dir, prepared: rig.preparedDir, out: rig.outDir, systemRoot: SYSTEM_ROOT }, rig.deps), 0);
+  const request = JSON.parse(readFileSync(path.join(rig.preparedDir, 'request.json'), 'utf8'));
+  const report = {
+    schemaVersion: 1, identity: request.identity, complete: true, limitations: [],
+    coverage: request.changes.flatMap((c: { path: string }) => ['test-validity', 'reliability-impact', 'maintainability'].map((dimension) => ({ path: c.path, dimension, assessment: 'reviewed', rationale: 'Reviewed.', relatedPaths: [] }))),
+    findings: [], reconciliations: [],
+  };
+  const runnerTemp = mkdtempSync(path.join(tmpdir(), 'srs-runner-'));
+  const model = loadTestPolicy().policy.model;
+  writeFileSync(path.join(runnerTemp, 'trace.json'), JSON.stringify([
+    { type: 'system', subtype: 'init', session_id: 'session-1', model },
+    { type: 'result', subtype: 'success', is_error: false, session_id: 'session-1', permission_denials: [], modelUsage: { [model]: {} }, num_turns: 2, total_cost_usd: 0.25, duration_ms: 1000, structured_output: report },
+  ]));
+  const capOut = path.join(mkdtempSync(path.join(tmpdir(), 'srs-capdir-')), 'capture');
+  const captureDeps = { ...rig.deps, env: { ...rig.env, ACTION_OUTCOME: 'success', ACTION_CONCLUSION: 'success', ACTION_SESSION_ID: 'session-1', ACTION_STRUCTURED_OUTPUT: JSON.stringify(report), ACTION_EXECUTION_FILE: path.join(runnerTemp, 'trace.json'), RUNNER_TEMP: runnerTemp } };
+  assert.equal(await runActionHost('capture', { out: capOut }, captureDeps), 0);
+  const finOut = path.join(mkdtempSync(path.join(tmpdir(), 'fin-')), 'out');
+  assert.equal(await runActionHost('finalize', { ...opts, prepared: rig.preparedDir, result: capOut, out: finOut }, rig.deps), 0);
+  assert.equal(rig.pushes.length, 2);
+  assert.equal(rig.posts.length, 1);
+  assert.deepEqual(rig.statuses.map((s) => s.state), ['pending', 'success']);
+  assert.equal(rig.statuses[1].sha, rig.source.headSha);
+  assert.equal(rig.statuses[1].body.context, 'sentinel-canonical-review');
+  assert.match(String(rig.statuses[1].body.target_url), /actions\/runs\/7$/);
+  assert.match(readFileSync(rig.env.GITHUB_OUTPUT as string, 'utf8'), /canonical_decision<<[^>]*\npass/);
+});
+
+test('dispatch rejects malformed inputs and stale identities with specific reasons and zero writes', async (): Promise<void> => {
+  const valid = { mode: 'review' as string | number, pr_number: '17' as string | number };
+  const cases: [string, DispatchOverrides, RegExp][] = [
+    ['mode-probe', { inputs: { mode: 'probe' } }, /mode must be review/],
+    ['leading-zero-pr', { inputs: { pr_number: '017' } }, /pr_number/],
+    ['unsafe-pr', { inputs: { pr_number: '9007199254740993' }, env: { SENTINEL_REVIEW_POC_APPROVED_PR: '9007199254740993' } }, /pr_number/],
+    ['missing-key', { inputs: { head_sha: undefined } }, /exactly mode, pr_number, base_sha, head_sha/],
+    ['extra-key', { inputs: { sneaky: 'x' } }, /exactly mode, pr_number, base_sha, head_sha/],
+    ['invalid-sha', { inputs: { head_sha: 'ZZZ' } }, /40-char/],
+    ['wrong-ref', { env: { GITHUB_REF: 'refs/heads/other' } }, /staging ref/],
+    ['wrong-workflow-ref', { env: { GITHUB_WORKFLOW_REF: 'devrev/sentinel/.github/workflows/other.yml@refs/heads/staging' } }, /canonical staging workflow/],
+    ['sha-not-base', { env: { GITHUB_SHA: 'e'.repeat(40) } }, /equal the dispatched staging commit/],
+    ['unapproved-pr', { env: { SENTINEL_REVIEW_POC_APPROVED_PR: '999' } }, /approved POC/],
+    ['workflow-sha-mismatch', { env: { GITHUB_WORKFLOW_SHA: 'e'.repeat(40) } }, /workflow ref SHA/],
+    ['closed-pr', { pull: { state: 'closed' } }, /not open/],
+    ['wrong-base-ref', { pull: { base: { ref: 'main', sha: 'b'.repeat(40) } } }, /not staging/],
+    ['stale-head', { pull: { head: { sha: 'd'.repeat(40), repo: { full_name: REPO } } } }, /stale/],
+    ['fork-head', { pull: { head: { sha: 'c'.repeat(40), repo: { full_name: 'other/fork' } } } }, /repository mismatch|stale/],
+    ['bad-title', { pull: { title: 'Normal PR title' } }, /POC test title/],
+    ['pull-403', { run: { event: 'workflow_dispatch' } }, /.+/],
+    ['run-id', { run: { id: 99 } }, /run id/],
+    ['run-attempt', { run: { run_attempt: 9 } }, /attempt/],
+    ['run-path', { run: { path: '.github/workflows/other.yml@x' } }, /review workflow/],
+    ['run-event', { run: { event: 'pull_request_target' } }, /event mismatch/],
+    ['run-branch', { run: { head_branch: 'main' } }, /staging branch/],
+    ['run-sha', { run: { head_sha: 'e'.repeat(40) } }, /dispatched staging commit/],
+  ];
+  void valid;
+  for (const [name, overrides, casePattern] of cases) {
+    const rig = makeDispatchRig(overrides);
+    let pattern = casePattern;
+    if (name === 'pull-403') {
+      rig.deps.http = (request: HttpRequest): HttpResponse => request.path.startsWith('/repos/devrev/sentinel/pulls/') ? { status: 403, json: {} } : { status: 200, json: {} };
+      pattern = /status 403/;
+    }
+    const outcome = await runActionHost('reserve', { ...dispatchOptions(rig), out: rig.preparedDir }, rig.deps).then((c) => `code-${c}`, (e: Error) => `err:${e.message}`);
+    assert.match(outcome, /^err:/, `${name}: reserve must reject, got ${outcome}`);
+    assert.match(outcome, pattern, `${name}: ${outcome}`);
+    assert.equal(rig.pushes.length, 0, name);
+    assert.equal(rig.posts.length, 0, name);
+    assert.equal(rig.statuses.length, 0, name);
+  }
+});
+
+test('unsafe pr_number with matching approval still makes no HTTP call', async (): Promise<void> => {
+  const rig = makeDispatchRig({ inputs: { pr_number: '9007199254740993' }, env: { SENTINEL_REVIEW_POC_APPROVED_PR: '9007199254740993' } });
+  let httpCalls = 0;
+  const inner = rig.deps.http;
+  rig.deps.http = (req: HttpRequest): HttpResponse => { httpCalls += 1; return inner(req) as HttpResponse; };
+  await runActionHost('reserve', { ...dispatchOptions(rig), out: rig.preparedDir }, rig.deps).then(() => 'ok', () => 'rejected');
+  assert.equal(httpCalls, 0);
+});
+
+test('fail-status posts only error; unapproved PR blocks both status stages in both modes', async (): Promise<void> => {
+  const rig = makeDispatchRig();
+  assert.equal(await runActionHost('fail-status', dispatchOptions(rig), rig.deps), 0);
+  assert.deepEqual(rig.statuses.map((s) => s.state), ['error']);
+  assert.equal(rig.statuses[0].sha, rig.source.headSha);
+  // Unapproved PR: status stages refuse in dispatch mode even without paid controls.
+  const denied = makeDispatchRig({ env: { SENTINEL_REVIEW_POC_APPROVED_PR: '999', SENTINEL_REVIEW_CONTROLS_VERIFIED: '' } });
+  await runActionHost('start-status', dispatchOptions(denied), denied.deps).then(() => 'ok', () => 'rejected');
+  assert.equal(denied.statuses.length, 0);
+  await runActionHost('fail-status', dispatchOptions(denied), denied.deps).then(() => 'ok', () => 'rejected');
+  assert.equal(denied.statuses.length, 0);
+  // pull_request_target mode: same approved-PR gate applies.
+  const legacy = makeRig() as DispatchRig;
+  legacy.statuses = [];
+  const legacyHttp = legacy.deps.http;
+  legacy.deps.http = (request: HttpRequest): HttpResponse => {
+    if (request.path.startsWith('/repos/devrev/sentinel/statuses/')) {
+      legacy.statuses.push({ state: String((request.body as { state: string }).state), sha: request.path.split('/statuses/')[1], body: request.body as Record<string, unknown> });
+      return { status: 201, json: {} };
+    }
+    return legacyHttp(request) as HttpResponse;
+  };
+  legacy.env = { ...legacy.env, SENTINEL_REVIEW_POC_APPROVED_PR: '999', SENTINEL_REVIEW_CONTROLS_VERIFIED: '' };
+  legacy.deps.env = legacy.env;
+  await runActionHost('start-status', { sourceCheckout: legacy.source.repo.dir, stateCheckout: legacy.stateDir, systemRoot: SYSTEM_ROOT }, legacy.deps).then(() => 'ok', () => 'rejected');
+  assert.equal(legacy.statuses.length, 0);
+  // Missing paid limits do not block a valid error status.
+  const rig2 = makeDispatchRig({ env: { SENTINEL_REVIEW_CONTROLS_VERIFIED: '', SENTINEL_REVIEW_MAX_TURNS: '' } });
+  assert.equal(await runActionHost('fail-status', dispatchOptions(rig2), rig2.deps), 0);
+  assert.deepEqual(rig2.statuses.map((s) => s.state), ['error']);
+});
+
+test('terminal statuses map decisions and status failures never emit a decision', async (): Promise<void> => {
+  // blocker retained -> failure
+  {
+    const rig = makeDispatchRig();
+    seedPriorBlocker(rig);
+    assert.equal(await runActionHost('reserve', { ...dispatchOptions(rig), out: rig.preparedDir }, rig.deps), 0);
+    const request = JSON.parse(readFileSync(path.join(rig.preparedDir, 'request.json'), 'utf8'));
+    const prior = JSON.parse(readFileSync(path.join(rig.stateDir, 'prs', '17.json'), 'utf8')).ledger.openFindings[0];
+    const report = {
+      schemaVersion: 1, identity: request.identity, complete: true, limitations: [],
+      coverage: request.changes.flatMap((c: { path: string }) => ['test-validity', 'reliability-impact', 'maintainability'].map((dimension) => ({ path: c.path, dimension, assessment: 'reviewed', rationale: 'Reviewed.', relatedPaths: [] }))),
+      findings: [prior],
+      reconciliations: [{ findingId: 'F-prior', outcome: 'open', rationale: 'Still blocking.', evidence: [prior.introducedBy] }],
+    };
+    writeResult(rig, report);
+    const finOut = path.join(mkdtempSync(path.join(tmpdir(), 'finb-')), 'out');
+    assert.equal(await runActionHost('finalize', { ...dispatchOptions(rig), prepared: rig.preparedDir, result: rig.resultDir, out: finOut }, rig.deps), 2);
+    assert.deepEqual(rig.statuses.map((s) => s.state), ['failure']);
+    assert.equal(rig.statuses[0].sha, rig.source.headSha);
+    assert.match(readFileSync(rig.env.GITHUB_OUTPUT as string, 'utf8'), /changes_required/);
+  }
+  // missing execution evidence -> error
+  {
+    const rig = makeDispatchRig();
+    assert.equal(await runActionHost('reserve', { ...dispatchOptions(rig), out: rig.preparedDir }, rig.deps), 0);
+    const finOut = path.join(mkdtempSync(path.join(tmpdir(), 'fini-')), 'out');
+    assert.equal(await runActionHost('finalize', { ...dispatchOptions(rig), prepared: rig.preparedDir, result: path.join(mkdtempSync(path.join(tmpdir(), 'abs-')), 'no'), out: finOut }, rig.deps), 3);
+    assert.deepEqual(rig.statuses.map((s) => s.state), ['error']);
+    assert.match(readFileSync(rig.env.GITHUB_OUTPUT as string, 'utf8'), /incomplete/);
+  }
+  // status POST 403: no decision output, no success status.
+  {
+    const rig = makeDispatchRig();
+    assert.equal(await runActionHost('reserve', { ...dispatchOptions(rig), out: rig.preparedDir }, rig.deps), 0);
+    const request = JSON.parse(readFileSync(path.join(rig.preparedDir, 'request.json'), 'utf8'));
+    const report = {
+      schemaVersion: 1, identity: request.identity, complete: true, limitations: [],
+      coverage: request.changes.flatMap((c: { path: string }) => ['test-validity', 'reliability-impact', 'maintainability'].map((dimension) => ({ path: c.path, dimension, assessment: 'reviewed', rationale: 'Reviewed.', relatedPaths: [] }))),
+      findings: [], reconciliations: [],
+    };
+    writeResult(rig, report);
+    const inner = rig.deps.http;
+    rig.deps.http = (request2: HttpRequest): HttpResponse => {
+      if (request2.path.startsWith('/repos/devrev/sentinel/statuses/')) return { status: 403, json: {} };
+      return inner(request2) as HttpResponse;
+    };
+    const outcome = await runActionHost('finalize', { ...dispatchOptions(rig), prepared: rig.preparedDir, result: rig.resultDir, out: path.join(mkdtempSync(path.join(tmpdir(), 'finf-')), 'out') }, rig.deps).then((c) => `code-${c}`, (e: Error) => `err:${e.message}`);
+    assert.match(outcome, /403/, outcome);
+    assert.equal(existsSync(rig.env.GITHUB_OUTPUT as string) ? readFileSync(rig.env.GITHUB_OUTPUT as string, 'utf8').includes('canonical_decision') : false, false);
+  }
+});
+
+test('a live head change after reserve fails check and finalize, never success', async (): Promise<void> => {
+  const rig = makeDispatchRig();
+  const opts = dispatchOptions(rig);
+  assert.equal(await runActionHost('reserve', { ...opts, out: rig.preparedDir }, rig.deps), 0);
+  const pull = { number: 17, state: 'open', title: 'POC Test: dispatch-DO NOT REVIEW', body: null, base: { ref: 'staging', sha: rig.source.baseSha }, head: { sha: 'd'.repeat(40), repo: { full_name: REPO } } };
+  const run = { id: 7, run_attempt: 3, event: 'workflow_dispatch', path: '.github/workflows/claude-code-review.yml@x', head_branch: 'staging', head_sha: rig.source.baseSha };
+  rig.deps.http = (request: HttpRequest): HttpResponse => {
+    if (request.path.startsWith('/repos/devrev/sentinel/pulls/')) return { status: 200, json: pull };
+    if (request.method === 'POST') { rig.posts.push(request); return { status: 201, json: {} }; }
+    return { status: 200, json: run };
+  };
+  const checkOutcome = await runActionHost('check', { ...opts, prepared: rig.preparedDir }, rig.deps).then((c) => `code-${c}`, (e: Error) => `err:${e.message}`);
+  assert.match(checkOutcome, /stale|differs from captured|head/i, checkOutcome);
+  const finOutcome = await runActionHost('finalize', { ...opts, prepared: rig.preparedDir, result: rig.resultDir, out: path.join(mkdtempSync(path.join(tmpdir(), 'finh-')), 'out') }, rig.deps).then((c) => `code-${c}`, (e: Error) => `err:${e.message}`);
+  assert.match(finOutcome, /superseded|stale|differs|head/i, finOutcome);
+  assert.equal(rig.posts.length, 0);
+  assert.equal(rig.statuses.every((s) => s.state !== 'success'), true);
 });

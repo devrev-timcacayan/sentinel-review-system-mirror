@@ -31,14 +31,21 @@ runtime-verified integration. Activation requires, before any paid run:
 ## Stages (`cli action-host <stage>`)
 
 The review stages, other than data-only `capture`, verify `GITHUB_ACTIONS=true`, `GITHUB_REPOSITORY=devrev/sentinel`,
-`GITHUB_EVENT_NAME=pull_request_target`, positive decimal run id/attempt, the
+`GITHUB_EVENT_NAME` `pull_request_target` or an explicit `mode: review`
+`workflow_dispatch` on `refs/heads/staging` (exact inputs: approved PR number,
+`base_sha` equal to `GITHUB_SHA`, `head_sha`), positive decimal run id/attempt, the
 event payload (staging base, same-repo head, full 40-hex SHAs, `POC Test:
 <desc>-DO NOT REVIEW` title), derives runId `gha-<run>-<attempt>`, and enforces
 the reviewer pin. GitHub API calls are limited to:
 `GET /repos/devrev/sentinel/pulls/N`, `GET
-/repos/devrev/sentinel/actions/runs/RUN`, and (finalize only) `POST
-/repos/devrev/sentinel/issues/N/comments` with a sanitized validated summary
-(mentions, HTML, and Markdown neutralized).
+/repos/devrev/sentinel/actions/runs/RUN`, and `POST` to
+`/repos/devrev/sentinel/issues/N/comments` (sanitized summary: mentions, HTML,
+and Markdown neutralized) and `/repos/devrev/sentinel/statuses/<headSha>`
+(fixed `sentinel-canonical-review` context: `start-status` pending,
+`fail-status` error, `finalize` terminal decision). `start-status` and
+`fail-status` deliberately do not require paid-control limits so a pending or
+error status can be recorded even when preparation cannot start; they still
+require approved-PR, pin, run, and live-PR identity.
 
 Prepared request/checkpoint identity, current policy/model, report schema, and
 artifact hashes are checked before investigation and finalization. Hashes detect
@@ -108,15 +115,32 @@ sentinel-review}.yml` are byte-identical mirrors; originals preserved under
 
 GitHub's `pull_request_target` semantics are confirmed to run the
 default-branch copy of a workflow, so these staging-only edits are not
-automatic PR activation. A `workflow_dispatch` trigger is present only to
-prove that a manually dispatched run can select the staging ref at all; no
-live dispatch has been run or proven. On dispatch, only the
-`staging-dispatch-probe` job is eligible (`if: github.event_name ==
-'workflow_dispatch'`): one bash step with empty permissions, no checkout, no
-actions dependencies, no secrets, token grants, OIDC, model calls, state
-updates, or publishing. All review jobs are gated to
-`pull_request_target`, and the final job keeps `always()` inside that event
-so it still runs on prepare/investigate failure but can never finalize on
-dispatch. There is no CircleCI bridge and no dispatch-based review support;
-dispatch is branch-selection feasibility only, and any cloud result remains
-unverified.
+automatic PR activation. `workflow_dispatch` accepts a `mode` input: `probe`
+(the safe default) runs only `staging-dispatch-probe`, while `review`
+requires exact `pr_number`/`base_sha`/`head_sha` inputs and runs the same
+three review jobs against the live PR. Frozen cloud evidence: run
+`41797946024` completed a `workflow_dispatch` probe on staging `22ecaa1` with
+all three review jobs skipped and activation vars empty; that proves branch
+selection only and is not paid-runtime verification. On dispatch the review
+path validates inputs, live PR identity, run binding, approved-PR env, pin,
+and controls before any state or model step, and publishes a fixed
+`sentinel-canonical-review` commit status on the exact PR head (pending via
+`start-status`, terminal via `finalize`, error fallback via `fail-status`);
+that status context must be configured on staging before anyone treats it as
+mandatory, and a successful dispatch is not PR approval. All review jobs are
+gated to `pull_request_target` or an explicit `mode: review` dispatch, and
+the final job keeps `always()` inside that condition.
+
+An opt-in CircleCI bridge exists at `integration/dispatch-sentinel-review.ts`
+(byte-identical mirror `scripts/ci/dispatch-sentinel-review.ts`): a staging
+pipeline with `run_sentinel_review=true` and `sentinel_review_pr='529'`
+routes to `.circleci/sentinel-review.yml`, which dispatches the canonical
+workflow with immutable base/head resolved from the live PR. It requires the
+`sentinel-review-dispatch` restricted context (provisioned out of band, no
+broad automation context), `SENTINEL_REVIEW_DISPATCH_READY=true`,
+`SENTINEL_REVIEW_DISPATCH_TOKEN` with Actions write plus contents/PR read for
+this repository only, and the approved-PR flag — all of which remain
+operator blockers. The bridge is a controlled launch route, not automatic
+review on PR updates; automatic PR-head triggering stays out of scope until
+trusted config/context setup is verified. The production `main` check is
+unchanged.

@@ -319,3 +319,33 @@ test('workflow templates satisfy the static contract', (): void => {
   assert.doesNotMatch(retired, /anthropics\/claude-code-action|configure-aws-credentials|pull_request_target/);
   assert.doesNotMatch(retired, /pull_request:/);
 });
+
+test('dispatch review guards keep probe default-off and route review through canonical gates', (): void => {
+  const template = readFileSync(path.join(SYSTEM_ROOT, 'integration', 'sentinel-claude-code-review.yml'), 'utf8');
+  assert.match(template, /mode:\s*\n\s+description:.*\n\s+type: choice\s*\n\s+options: \[probe, review\]\s*\n\s+required: true\s*\n\s+default: probe/);
+  assert.match(template, /staging-dispatch-probe:\s*\n\s+if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.mode != 'review' \}\}/);
+  assert.match(template, /PROBE_MODE: \$\{\{ inputs\.mode \}\}/);
+  assert.match(template, /test "\$PROBE_MODE" = 'probe'/);
+  const guardSrc = "github\\.event_name == 'pull_request_target' \\|\\| \\(github\\.event_name == 'workflow_dispatch' && inputs\\.mode == 'review'\\)";
+  assert.match(template, new RegExp(`prepare:\\s*\\n\\s+if: \\$\\{\\{ ${guardSrc} \\}\\}`));
+  const prepareJob = template.split('\n  prepare:')[1].split('\n  investigate:')[0];
+  const investigateJob = template.split('\n  investigate:')[1].split('\n  claude-auto-review:')[0];
+  const finalJob = template.split('\n  claude-auto-review:')[1];
+  assert.match(investigateJob, new RegExp(`if: \\$\\{\\{ needs\\.prepare\\.result == 'success' && \\(${guardSrc}\\) \\}\\}`));
+  assert.match(finalJob, new RegExp(`if: \\$\\{\\{ always\\(\\) && \\(${guardSrc}\\) \\}\\}`), 'final keeps always() inside the review guard');
+  const preparePerms = prepareJob.split('permissions:')[1].split('outputs:')[0];
+  const investigatePerms = investigateJob.split('permissions:')[1].split('steps:')[0];
+  const finalPerms = finalJob.split('permissions:')[1].split('steps:')[0];
+  assert.match(preparePerms, /statuses: write/);
+  assert.match(finalPerms, /statuses: write/);
+  assert.doesNotMatch(investigatePerms, /statuses: write|contents: write|pull-requests: write/, 'model job must not gain write grants');
+  const startIdx = prepareJob.indexOf('action-host start-status');
+  const stateIdx = prepareJob.indexOf('Checkout existing operational state branch');
+  assert.ok(startIdx > -1 && stateIdx > -1 && startIdx < stateIdx, 'pending status is marked before the state checkout');
+  assert.match(finalJob, /id: finalize/);
+  const fallbackStep = finalJob.split('action-host fail-status')[0].split('id: finalize')[1];
+  assert.match(fallbackStep, /if: \$\{\{ always\(\) && steps\.finalize\.outputs\.canonical_decision == '' \}\}/, 'fallback only runs when no canonical decision was emitted');
+  const finalizeRun = finalJob.split('id: finalize')[1].split('- name: Mark the exact PR head review failed')[0];
+  assert.doesNotMatch(finalizeRun, /continue-on-error/);
+  assert.match(template, /sentinel-canonical-review-\$\{\{ github\.event\.pull_request\.number \|\| \(inputs\.mode == 'review' && inputs\.pr_number\) \|\| github\.run_id \}\}/);
+});

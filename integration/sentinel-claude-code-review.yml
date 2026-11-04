@@ -6,11 +6,33 @@ on:
     branches: [staging]
     types: [opened, reopened, synchronize, ready_for_review]
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Dispatch mode; probe is the safe default.'
+        type: choice
+        options: [probe, review]
+        required: true
+        default: probe
+      pr_number:
+        description: 'PR number; required for mode review.'
+        type: string
+        required: false
+        default: ''
+      base_sha:
+        description: 'PR base SHA; required for mode review.'
+        type: string
+        required: false
+        default: ''
+      head_sha:
+        description: 'PR head SHA; required for mode review.'
+        type: string
+        required: false
+        default: ''
 
 permissions: {}
 
 concurrency:
-  group: sentinel-canonical-review-${{ github.event.pull_request.number || github.run_id }}
+  group: sentinel-canonical-review-${{ github.event.pull_request.number || (inputs.mode == 'review' && inputs.pr_number) || github.run_id }}
   cancel-in-progress: true
 
 env:
@@ -26,28 +48,32 @@ env:
 
 jobs:
   staging-dispatch-probe:
-    if: ${{ github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode != 'review' }}
     runs-on: ubuntu-latest
     timeout-minutes: 1
     permissions: {}
     steps:
       - name: Verify the dispatched staging workflow ref
         shell: bash
+        env:
+          PROBE_MODE: ${{ inputs.mode }}
         run: |
           set -euo pipefail
           printf 'event=%s\nref=%s\nsha=%s\nworkflow_ref=%s\n' "$GITHUB_EVENT_NAME" "$GITHUB_REF" "$GITHUB_SHA" "$GITHUB_WORKFLOW_REF"
           test "$GITHUB_EVENT_NAME" = 'workflow_dispatch'
+          test "$PROBE_MODE" = 'probe'
           test "$GITHUB_REPOSITORY" = 'devrev/sentinel'
           test "$GITHUB_REF" = 'refs/heads/staging'
           test "$GITHUB_WORKFLOW_REF" = 'devrev/sentinel/.github/workflows/claude-code-review.yml@refs/heads/staging'
 
   prepare:
-    if: ${{ github.event_name == 'pull_request_target' }}
+    if: ${{ github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'review') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: read
       actions: read
+      statuses: write
     outputs:
       timeout_minutes: ${{ steps.prepare.outputs.timeout_minutes }}
     steps:
@@ -60,7 +86,7 @@ jobs:
       - name: Checkout trusted Sentinel base and Git history
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.event.pull_request.base.sha || inputs.base_sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -73,14 +99,6 @@ jobs:
           path: review-system
           persist-credentials: false
 
-      - name: Checkout existing operational state branch
-        uses: actions/checkout@v6
-        with:
-          ref: sentinel-review-state
-          path: review-state
-          persist-credentials: false
-          fetch-depth: 0
-
       - uses: actions/setup-node@v4
         with:
           node-version: "22.18.0"
@@ -88,6 +106,20 @@ jobs:
       - name: Install only trusted reviewer dependencies
         working-directory: review-system
         run: npm ci --ignore-scripts
+
+      - name: Mark the exact PR head review pending
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --experimental-strip-types review-system/src/cli.ts action-host start-status
+
+      - name: Checkout existing operational state branch
+        uses: actions/checkout@v6
+        with:
+          ref: sentinel-review-state
+          path: review-state
+          persist-credentials: false
+          fetch-depth: 0
 
       - name: Prepare canonical review and reserve prior-finding state
         id: prepare
@@ -107,7 +139,7 @@ jobs:
           if-no-files-found: error
 
   investigate:
-    if: ${{ github.event_name == 'pull_request_target' && needs.prepare.result == 'success' }}
+    if: ${{ needs.prepare.result == 'success' && (github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'review')) }}
     needs: prepare
     runs-on: ubuntu-latest
     # The fallback is only for a skipped job after failed preparation, never a run limit.
@@ -120,7 +152,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.event.pull_request.base.sha || inputs.base_sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -213,13 +245,14 @@ jobs:
           if-no-files-found: error
 
   claude-auto-review:
-    if: ${{ always() && github.event_name == 'pull_request_target' }}
+    if: ${{ always() && (github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'review')) }}
     needs: [prepare, investigate]
     runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write
       actions: read
+      statuses: write
     steps:
       - name: Require the canonical reviewer pin
         run: |
@@ -227,7 +260,7 @@ jobs:
 
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.event.pull_request.base.sha || inputs.base_sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -269,6 +302,7 @@ jobs:
           path: ${{ runner.temp }}/action-result
 
       - name: Validate, persist, publish, and enforce the canonical decision
+        id: finalize
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -278,6 +312,13 @@ jobs:
             --prepared "$RUNNER_TEMP/prepared" \
             --result "$RUNNER_TEMP/action-result" \
             --out "$RUNNER_TEMP/validated"
+
+      - name: Mark the exact PR head review failed when validation did not complete
+        if: ${{ always() && steps.finalize.outputs.canonical_decision == '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --experimental-strip-types review-system/src/cli.ts action-host fail-status
 
       - name: Preserve validation evidence
         if: ${{ always() }}
