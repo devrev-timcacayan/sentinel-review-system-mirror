@@ -28,6 +28,10 @@ function items(value: unknown): unknown {
   return value.items;
 }
 
+test('agent schema declares the draft-07 dialect accepted by Claude structured output', (): void => {
+  assert.equal(createAgentReportSchema(IDENTITY).$schema, 'http://json-schema.org/draft-07/schema#');
+});
+
 test('agent schema requires the non-partitioned report contract and binds every identity field', (): void => {
   const schema = createAgentReportSchema(IDENTITY);
   assert.deepEqual(schema.required, [
