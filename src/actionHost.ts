@@ -590,7 +590,7 @@ export function renderSummary(decision: GateDecision, runId: string, runUrl: str
       .join(', ');
     lines.push('', `**Findings:** ${counts}`);
     for (const finding of decision.ledger.openFindings) {
-      lines.push(`- ${codeSpan(finding.id)} [${finding.severity}] ${codeSpan(finding.title)} (${codeSpan(finding.introducedBy.path)}:${String(finding.introducedBy.startLine)})`);
+      lines.push(`- [${finding.severity}] ${codeSpan(finding.title)} (${codeSpan(finding.introducedBy.path)}:${String(finding.introducedBy.startLine)})`);
     }
   }
   lines.push(
@@ -643,7 +643,7 @@ const REVIEW_BODY_LIMIT = 1500;
 // untrusted field is still flattened and stripped before it reaches GitHub.
 function findingReviewBody(finding: Finding): string {
   const body = [
-    `**[${finding.severity}] ${codeSpan(finding.id)}: ${sanitizeValue(finding.title)}**`,
+    `**[${finding.severity}] ${sanitizeValue(finding.title)}**`,
     '',
     sanitizeValue(finding.explanation),
     '',

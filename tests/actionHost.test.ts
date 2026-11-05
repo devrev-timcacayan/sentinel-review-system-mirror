@@ -600,7 +600,7 @@ test('finalize publishes literal markdown with untrusted values in code spans an
   assert.doesNotMatch(body, /\\/, 'no backslash-escaped markdown may remain');
   assert.doesNotMatch(body, /—/, 'no em dash may appear in published text');
   assert.match(body, /\*\*Run:\*\* `gha-7-3` · \[workflow run\]\(https:\/\/github\.com\/devrev\/sentinel\/actions\/runs\/7\)/);
-  assert.match(body, /\*\*Findings:\*\* 1 blocker\n- `F-prior` \[blocker\] `Synthetic prior blocker claude b \[link\]\(https:\/\/example\.test\)` \(`src\/action\.ts`:1\)/);
+  assert.match(body, /\*\*Findings:\*\* 1 blocker\n- \[blocker\] `Synthetic prior blocker claude b \[link\]\(https:\/\/example\.test\)` \(`src\/action\.ts`:1\)/);
   assert.doesNotMatch(body, /Synthetic unresolved finding|blocking-state fixture/, 'compact summary omits explanation and impact prose');
   assert.doesNotMatch(body, /@claude|<b>/, 'mention and HTML characters are stripped from values');
   assert.match(body, /\n_Synthetic\/offline artifacts are never operational approvals\. This check is a required review gate, not a merge decision\._\n<!-- sentinel-review -->\n$/);
@@ -785,7 +785,7 @@ test('renderSummary caps reasons, lists findings one line each, and keeps the ma
     'gha-7-3',
     'https://github.com/devrev/sentinel/actions/runs/7',
   );
-  assert.match(blocked, /\*\*Findings:\*\* 1 blocker, 1 advisory, 1 question\n- `F-one` \[blocker\] `F-one synthetic title claude` \(`src\/action\.ts`:5\)\n- `F-two` \[question\] `F-two synthetic title claude` \(`src\/action\.ts`:5\)\n- `F-three` \[advisory\] `F-three synthetic title claude` \(`src\/action\.ts`:10\)/);
+  assert.match(blocked, /\*\*Findings:\*\* 1 blocker, 1 advisory, 1 question\n- \[blocker\] `F-one synthetic title claude` \(`src\/action\.ts`:5\)\n- \[question\] `F-two synthetic title claude` \(`src\/action\.ts`:5\)\n- \[advisory\] `F-three synthetic title claude` \(`src\/action\.ts`:10\)/);
   assert.doesNotMatch(blocked, /synthetic explanation|synthetic impact/, 'no explanation or impact prose');
 });
 
@@ -811,7 +811,7 @@ test('finalize posts a formal review with inline and file-level comments after t
   assert.equal(body.comments.length, 3);
   assert.deepEqual(body.comments[0], {
     path: 'src/action.ts', line: 5, side: 'RIGHT',
-    body: '**[blocker] `F-inline`: F-inline synthetic title claude**\n\nF-inline synthetic explanation.\n\n**Impact:** F-inline synthetic impact.',
+    body: '**[blocker] F-inline synthetic title claude**\n\nF-inline synthetic explanation.\n\n**Impact:** F-inline synthetic impact.',
   });
   assert.equal(body.comments[1].subject_type, 'file', 'head line outside the diff hunks degrades to file level');
   assert.equal(body.comments[2].subject_type, 'file', 'base-revision findings are file level');

@@ -303,33 +303,34 @@ export function evaluateSingleReview(
   for (const finding of report.findings) {
     if (!ruleIds.has(finding.ruleId) && finding.ruleId !== 'novel') return invalid(`Unknown rule: ${finding.ruleId}.`);
     if (finding.ruleId === 'novel' && finding.severity === 'blocker') return invalid('A novel concern cannot establish blocking policy.');
-    if (!attributedPaths.has(finding.introducedBy.path)) return invalid(`Finding ${finding.id} is not attributed to a changed path.`);
+    if (!attributedPaths.has(finding.introducedBy.path)) return invalid(`Finding "${finding.title}" is not attributed to a changed path.`);
     if (![finding.introducedBy, ...finding.evidence].every((evidence): boolean => evidenceExists(snapshot, evidence))) {
-      return invalid(`Finding ${finding.id} has evidence absent from the captured source.`);
+      return invalid(`Finding "${finding.title}" has evidence absent from the captured source.`);
     }
   }
 
   const previousIds = new Set(previous.openFindings.map((finding): string => finding.id));
+  const priorTitle = (id: string): string => previous.openFindings.find((finding): boolean => finding.id === id)?.title ?? id;
   for (const reconciliation of report.reconciliations) {
     if (!previousIds.has(reconciliation.findingId)) return invalid(`Reconciliation references an unknown prior finding: ${reconciliation.findingId}.`);
     if (!reconciliation.evidence.every((evidence): boolean => evidenceExists(snapshot, evidence))) {
-      return invalid(`Reconciliation for ${reconciliation.findingId} has unavailable code evidence.`);
+      return invalid(`Reconciliation for "${priorTitle(reconciliation.findingId)}" has unavailable code evidence.`);
     }
     if (reconciliation.outcome !== 'open' && findingIds.includes(reconciliation.findingId)) {
-      return invalid(`Finding ${reconciliation.findingId} is both open and resolved.`);
+      return invalid(`Finding "${priorTitle(reconciliation.findingId)}" is both open and resolved.`);
     }
   }
   for (const prior of previous.openFindings) {
     const reconciliation = report.reconciliations.find((item): boolean => item.findingId === prior.id);
     const current = report.findings.find((finding): boolean => finding.id === prior.id);
     if (current && (current.ruleId !== prior.ruleId || current.severity !== prior.severity)) {
-      return invalid(`Finding ${prior.id} changed rule or severity without authorized adjudication.`);
+      return invalid(`Finding "${prior.title}" changed rule or severity without authorized adjudication.`);
     }
     if (!reconciliation) {
-      add(`Prior finding ${prior.id} was not reconciled.`);
+      add(`Prior finding "${prior.title}" was not reconciled.`);
       continue;
     }
-    if (reconciliation.outcome === 'open' && !current) add(`Open finding ${prior.id} is missing from current findings.`);
+    if (reconciliation.outcome === 'open' && !current) add(`Open finding "${prior.title}" is missing from current findings.`);
   }
 
   const retained = new Map(previous.openFindings.map((finding): [string, Finding] => [finding.id, finding]));
@@ -349,6 +350,6 @@ export function evaluateSingleReview(
   if (reasons.length > 0) return { status: 'incomplete', reasons: [...new Set(reasons)], ledger };
   const blockers = ledger.openFindings.filter((finding): boolean => finding.severity === 'blocker');
   return blockers.length > 0
-    ? { status: 'changes_required', reasons: blockers.map((finding): string => `${finding.id}: ${finding.title}`), ledger }
+    ? { status: 'changes_required', reasons: blockers.map((finding): string => finding.title), ledger }
     : { status: 'pass', reasons: [], ledger };
 }

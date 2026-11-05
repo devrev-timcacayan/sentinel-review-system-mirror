@@ -381,7 +381,7 @@ test('the published summary stays compact and marker-bound', (): void => {
   const reasonBullets = body.split('**Findings:**')[0].split('\n').filter((line: string): boolean => line.startsWith('- `'));
   assert.equal(reasonBullets.length, 5, 'reasons cap at five bullets');
   assert.match(body, /^- \+1 more, see workflow run$/m);
-  assert.match(body, /\*\*Findings:\*\* 1 blocker, 1 question\n- `F-one` \[blocker\] `First` \(`src\/action\.ts`:5\)\n- `F-two` \[question\] `Second` \(`src\/action\.ts`:5\)/);
+  assert.match(body, /\*\*Findings:\*\* 1 blocker, 1 question\n- \[blocker\] `First` \(`src\/action\.ts`:5\)\n- \[question\] `Second` \(`src\/action\.ts`:5\)/);
   assert.doesNotMatch(body, /long explanation|long impact/);
   assert.doesNotMatch(body, /—|\\/, 'no em dash or backslash escapes in published text');
   assert.match(body, /<!-- sentinel-review -->\n$/);
