@@ -17,7 +17,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  REVIEW_SYSTEM_SHA: '6b3a92fa3f3637ef9fd1639017f033154944a521'
+  # The reviewer follows this branch; prepare resolves it to one commit per
+  # run and every job uses that commit (switch to 'main' when finalized).
+  REVIEW_SYSTEM_REF: 'staging'
   SENTINEL_REVIEW_TIMEOUT_MINUTES: '15'
   SENTINEL_REVIEW_MAX_FILES: '200'
   SENTINEL_REVIEW_MAX_SOURCE_BYTES: '4000000'
@@ -34,12 +36,13 @@ jobs:
       statuses: write
     outputs:
       timeout_minutes: ${{ steps.prepare.outputs.timeout_minutes }}
+      review_system_sha: ${{ steps.reviewer.outputs.sha }}
     steps:
-      - name: Require a pinned canonical reviewer and private checkout access
+      - name: Require private checkout access
         env:
           READ_TOKEN_PRESENT: ${{ secrets.SENTINEL_REVIEW_SYSTEM_READ_TOKEN != '' }}
         run: |
-          node -e 'if (!/^[0-9a-f]{40}$/.test(process.env.REVIEW_SYSTEM_SHA || "") || process.env.READ_TOKEN_PRESENT !== "true") { throw new Error("The SENTINEL_REVIEW_SYSTEM_READ_TOKEN secret needs read access to the review repository."); }'
+          node -e 'if (process.env.READ_TOKEN_PRESENT !== "true") { throw new Error("The SENTINEL_REVIEW_SYSTEM_READ_TOKEN secret needs read access to the review repository."); }'
 
       - name: Checkout trusted Sentinel base and Git history
         uses: actions/checkout@v6
@@ -48,14 +51,22 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Checkout pinned canonical reviewer
+      - name: Checkout the reviewer branch
         uses: actions/checkout@v6
         with:
           repository: devrev/sentinel-review-system
-          ref: ${{ env.REVIEW_SYSTEM_SHA }}
+          ref: ${{ env.REVIEW_SYSTEM_REF }}
           token: ${{ secrets.SENTINEL_REVIEW_SYSTEM_READ_TOKEN }}
           path: review-system
           persist-credentials: false
+
+      - id: reviewer
+        name: Resolve the reviewer commit for this run
+        run: |
+          sha="$(git -C review-system rev-parse HEAD)"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Could not resolve the reviewer commit." >&2; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "REVIEW_SYSTEM_SHA=$sha" >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@v4
         with:
@@ -107,6 +118,8 @@ jobs:
       pull-requests: read
       actions: read
       id-token: write
+    env:
+      REVIEW_SYSTEM_SHA: ${{ needs.prepare.outputs.review_system_sha }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -212,10 +225,12 @@ jobs:
       issues: write
       actions: read
       statuses: write
+    env:
+      REVIEW_SYSTEM_SHA: ${{ needs.prepare.outputs.review_system_sha }}
     steps:
-      - name: Require the canonical reviewer pin
+      - name: Require the resolved reviewer commit
         run: |
-          node -e 'if (!/^[0-9a-f]{40}$/.test(process.env.REVIEW_SYSTEM_SHA || "")) { throw new Error("Missing canonical reviewer commit; review cannot pass."); }'
+          node -e 'if (!/^[0-9a-f]{40}$/.test(process.env.REVIEW_SYSTEM_SHA || "")) { throw new Error("The reviewer commit was not resolved; review cannot pass."); }'
 
       - uses: actions/checkout@v6
         with:

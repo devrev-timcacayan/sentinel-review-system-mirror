@@ -391,7 +391,8 @@ test('manual dispatch workflow exposes one PR input and the canonical guards', (
   const template = readFileSync(path.join(SYSTEM_ROOT, 'integration', 'sentinel-claude-code-review.yml'), 'utf8');
   assert.doesNotMatch(template, /pull_request_target|staging-dispatch-probe|PROBE_MODE|inputs\.mode|inputs\.base_sha|inputs\.head_sha/);
   assert.match(template, /workflow_dispatch:\s*\n\s+inputs:\s*\n\s+pr_number:\s*\n\s+description: 'PR number to review'\s*\n\s+type: string\s*\n\s+required: true\s*\n\s+default: '529'/);
-  assert.match(template, /REVIEW_SYSTEM_SHA: '6b3a92fa3f3637ef9fd1639017f033154944a521'/);
+  assert.doesNotMatch(template, /REVIEW_SYSTEM_SHA: '[0-9a-f]{40}'/);
+  assert.match(template, /REVIEW_SYSTEM_REF: 'staging'/);
   assert.doesNotMatch(template, /SENTINEL_REVIEW_MAX_USD|SENTINEL_REVIEW_MAX_TURNS/);
   assert.match(template, /secrets\.SENTINEL_REVIEW_SYSTEM_READ_TOKEN/);
   assert.doesNotMatch(template, /SENTINEL_REVIEW_POC_APPROVED_PR|SENTINEL_REVIEW_CONTROLS_VERIFIED|CLAUDE_REVIEW_PAT/);
@@ -417,4 +418,15 @@ test('manual dispatch workflow exposes one PR input and the canonical guards', (
   const fallbackStep = finalJob.split('action-host fail-status')[0].split('id: finalize')[1];
   assert.match(fallbackStep, /if: \$\{\{ always\(\) && steps\.finalize\.outputs\.canonical_decision == '' \}\}/);
   assert.doesNotMatch(finalJob.split('id: finalize')[1].split('- name: Mark the exact PR head review failed')[0], /continue-on-error/);
+  assert.match(prepareJob, /ref: \$\{\{ env\.REVIEW_SYSTEM_REF \}\}/);
+  assert.match(prepareJob, /git -C review-system rev-parse HEAD/);
+  assert.match(prepareJob, />> "\$GITHUB_OUTPUT"/);
+  assert.match(prepareJob, /REVIEW_SYSTEM_SHA=\$sha" >> "\$GITHUB_ENV"/);
+  assert.match(prepareJob, /review_system_sha: \$\{\{ steps\.reviewer\.outputs\.sha \}\}/);
+  const resolveIdx = prepareJob.indexOf('id: reviewer');
+  assert.ok(resolveIdx > -1 && resolveIdx < startIdx && resolveIdx < stateIdx, 'the reviewer commit resolves before status and state steps');
+  assert.match(investigateJob, /REVIEW_SYSTEM_SHA: \$\{\{ needs\.prepare\.outputs\.review_system_sha \}\}/);
+  assert.match(finalJob, /REVIEW_SYSTEM_SHA: \$\{\{ needs\.prepare\.outputs\.review_system_sha \}\}/);
+  assert.equal(template.match(/ref: \$\{\{ env\.REVIEW_SYSTEM_REF \}\}/g)?.length, 1);
+  assert.equal(template.match(/ref: \$\{\{ env\.REVIEW_SYSTEM_SHA \}\}/g)?.length, 2);
 });

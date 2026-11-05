@@ -14,8 +14,10 @@ staging POC requires, before any further run:
   `pr_number` (e.g. `gh workflow run claude-code-review.yml --ref staging -f
   pr_number=529`). One required string input; no mode/base/head inputs, no
   probe job, no `pull_request_target` trigger on this staging template.
-- `REVIEW_SYSTEM_SHA` is pinned literally in the workflow to commit
-  `6b3a92fa3f3637ef9fd1639017f033154944a521`; no variable substitution.
+- The workflow follows the `staging` branch via `REVIEW_SYSTEM_REF`: prepare
+  resolves it to one commit per run and passes that commit to the other jobs,
+  every stage verifies its checkout matches it and is clean, and the resolved
+  commit is recorded in the prepared request and state.
 - The dedicated `SENTINEL_REVIEW_SYSTEM_READ_TOKEN` secret is used for the
   reviewer checkouts and must have read access to the review repository.
 - Fixed limits: 15-minute timeout, 200 files, 4,000,000 source bytes, 200,000
@@ -155,11 +157,10 @@ CircleCI bridge were removed: manual dispatch is the only launch path. The
 host still accepts a `pull_request_target` event or the deprecated four-input
 dispatch for compatibility, but the current template exposes neither.
 
-The staging deployment pins `6b3a92fa3f3637ef9fd1639017f033154944a521`,
-which predates the paginated sticky-summary lookup, its page bound, the
-summary footer wording, and the prompt wording updates. The behavior below
-takes effect only when a new commit is pinned into the canonical template,
-the staging mirror, and `tests/actionIntegration.test.ts`.
+Changes pushed to sentinel-review-system `staging` apply to the next
+dispatch with no Sentinel edit. Anyone who can push to the reviewer branch changes code that runs
+with the final job's write permissions on Sentinel, so the branch needs
+required-review protection before switching `REVIEW_SYSTEM_REF` to `main`.
 
 On finalize, the sticky summary walks issue-comment pages while pages come
 back full (`per_page=100`, then `&page=N`), stops on the first eligible
