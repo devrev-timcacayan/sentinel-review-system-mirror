@@ -190,8 +190,8 @@ export function inspectPartitionReport(
   const decision = evaluateSingleReview(snapshot, input, previous, policy);
   const report = isReport(input) ? input : null;
   const citationOnly = decision.reasons.length === 1
-    && (/^Finding [A-Za-z0-9._-]+ has evidence absent from the captured source\.$/.test(decision.reasons[0])
-      || /^Reconciliation for [A-Za-z0-9._-]+ has unavailable code evidence\.$/.test(decision.reasons[0]));
+    && (/^Finding ".*" has evidence absent from the captured source\.$/s.test(decision.reasons[0])
+      || /^Reconciliation for ".*" has unavailable code evidence\.$/s.test(decision.reasons[0]));
   return {
     accepted: decision.status !== 'incomplete',
     repairable: report !== null && report.complete && report.limitations.length === 0 && citationOnly,

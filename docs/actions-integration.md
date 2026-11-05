@@ -7,9 +7,8 @@ artifacts either (mode/synthetic/operational flags are validated as an exact pai
 
 ## Status and blockers
 
-This is implemented code plus offline contract tests, not an activated or
-runtime-verified integration. The manual staging POC requires, before any paid
-run:
+This document describes implemented local code and its contract tests. The
+staging POC requires, before any further run:
 
 - A manual `workflow_dispatch` of `claude-code-review.yml` on `staging` with
   `pr_number` (e.g. `gh workflow run claude-code-review.yml --ref staging -f
@@ -19,10 +18,6 @@ run:
   `6b3a92fa3f3637ef9fd1639017f033154944a521`; no variable substitution.
 - The dedicated `SENTINEL_REVIEW_SYSTEM_READ_TOKEN` secret is used for the
   reviewer checkouts and must have read access to the review repository.
-  Run 41839027490 proved the private checkout and AWS auth path; that run
-  failed only on the report $schema dialect, fixed locally at
-  6b3a92fa3f3637ef9fd1639017f033154944a521. A complete live model review
-  remains unproven.
 - Fixed limits: 15-minute timeout, 200 files, 4,000,000 source bytes, 200,000
   per-read bytes. There are no USD or turn caps on the manual path; recorded
   usage remains evidence for later refinement. Nothing else needs
@@ -34,10 +29,11 @@ run:
   before treating it as a mandatory merge check; this work does not configure
   branch protection or required checks and a dispatch success is not PR
   approval.
-- Source-layout, restricted-tools, settings, and SDK trace-format facts are
-  confirmed by lead source capture of the pinned action
-  (`1d6de8cb0c237e7c15e9e1bdf973826ebae490cc`) and local `claude --help`, not
-  by a successful cloud model run; runtime behavior is still unverified.
+- Source-layout, restricted-tools, settings, and SDK trace-format facts come
+  from lead source capture of the pinned action
+  (`1d6de8cb0c237e7c15e9e1bdf973826ebae490cc`) and local `claude --help`.
+  Historical runs (probe `41797946024`, checkout `41839027490`) are
+  operator-reported evidence, not re-verified in this pass.
 
 Legacy `pull_request_target` host paths still require the old
 `SENTINEL_REVIEW_POC_APPROVED_PR` / `SENTINEL_REVIEW_CONTROLS_VERIFIED` flags
@@ -143,42 +139,49 @@ because the offline CLI, docs, and tests still reference them.
 
 ## Workflow files
 
-`integration/sentinel-claude-code-review.yml` is the canonical template with
-three review jobs (prepare/check/finalize split of contents:write,
-contents:read + id-token, contents:write) plus an isolated dispatch probe.
-`integration/retired-sentinel-review.yml` retires the old experiment. Staging
-copies at `/private/tmp/sentinel-staging/.github/workflows/{claude-code-review,
-sentinel-review}.yml` are byte-identical mirrors; originals preserved under
-`.artifacts/action-integration-verify/staging-originals/`.
+`integration/sentinel-claude-code-review.yml` is the canonical template: a
+manual `workflow_dispatch` with one required `pr_number` input and three
+permission-separated review jobs (prepare: contents/statuses write plus
+pull-requests/actions read; investigate: contents/pull-requests/actions read
+plus id-token:write around the single pinned Claude Code Action call;
+claude-auto-review: contents/pull-requests/issues/statuses write plus actions read,
+with `always()` inside the dispatch guard).
+`integration/retired-sentinel-review.yml` retires the old experiment. The
+staging copy `.github/workflows/claude-code-review.yml` is a byte-identical
+mirror; originals were preserved under the local, gitignored
+`.artifacts/action-integration-verify/` directory, absent from a fresh clone.
+The earlier probe job, mode/SHA inputs, `pull_request_target` trigger, and
+CircleCI bridge were removed: manual dispatch is the only launch path. The
+host still accepts a `pull_request_target` event or the deprecated four-input
+dispatch for compatibility, but the current template exposes neither.
 
-GitHub's `pull_request_target` semantics are confirmed to run the
-default-branch copy of a workflow, so these staging-only edits are not
-automatic PR activation. `workflow_dispatch` accepts a `mode` input: `probe`
-(the safe default) runs only `staging-dispatch-probe`, while `review`
-requires exact `pr_number`/`base_sha`/`head_sha` inputs and runs the same
-three review jobs against the live PR. Frozen cloud evidence: run
-`41797946024` completed a `workflow_dispatch` probe on staging `22ecaa1` with
-all three review jobs skipped and activation vars empty; that proves branch
-selection only and is not paid-runtime verification. On dispatch the review
-path validates inputs, live PR identity, run binding, approved-PR env, pin,
-and controls before any state or model step, and publishes a fixed
-`sentinel-review` commit status on the exact PR head (pending via
-`start-status`, terminal via `finalize`, error fallback via `fail-status`);
-that status context must be configured on staging before anyone treats it as
-mandatory, and a successful dispatch is not PR approval. All review jobs are
-gated to `pull_request_target` or an explicit `mode: review` dispatch, and
-the final job keeps `always()` inside that condition.
+The staging deployment pins `6b3a92fa3f3637ef9fd1639017f033154944a521`,
+which predates the paginated sticky-summary lookup, its page bound, the
+summary footer wording, and the prompt wording updates. The behavior below
+takes effect only when a new commit is pinned into the canonical template,
+the staging mirror, and `tests/actionIntegration.test.ts`.
 
-An opt-in CircleCI bridge exists at `integration/dispatch-sentinel-review.ts`
-(byte-identical mirror `scripts/ci/dispatch-sentinel-review.ts`): a staging
-pipeline with `run_sentinel_review=true` and `sentinel_review_pr='529'`
-routes to `.circleci/sentinel-review.yml`, which dispatches the canonical
-workflow with immutable base/head resolved from the live PR. It requires the
-`sentinel-review-dispatch` restricted context (provisioned out of band, no
-broad automation context), `SENTINEL_REVIEW_DISPATCH_READY=true`,
-`SENTINEL_REVIEW_DISPATCH_TOKEN` with Actions write plus contents/PR read for
-this repository only, and the approved-PR flag — all of which remain
-operator blockers. The bridge is a controlled launch route, not automatic
-review on PR updates; automatic PR-head triggering stays out of scope until
-trusted config/context setup is verified. The production `main` check is
-unchanged.
+On finalize, the sticky summary walks issue-comment pages while pages come
+back full (`per_page=100`, then `&page=N`), stops on the first eligible
+marker, terminates on a short or empty page, fails closed on any failed or
+malformed page, and refuses after 20 full pages; only a marker comment
+authored by `github-actions[bot]` is patched. A `changes_required` decision
+posts a formal `REQUEST_CHANGES` review, which may affect mergeability
+depending on repository review settings; this code does not configure the
+status as a required check. Each run posts findings as a separate formal
+review, so repeated runs add more reviews.
+
+The ledger is persisted before publishing; a later publication failure fails
+the job and withholds a success status and the decision output, but does not
+roll back the persisted ledger. The fallback step records an error status in
+that case. Historical cloud runs (probe `41797946024`, checkout
+`41839027490`) are prior evidence, not re-verified here.
+
+Contract notes worth knowing: the coverage cross-check that requires every
+dependency neighbor in `relatedPaths` applies only to `reliability-impact`
+entries; `sourceReads` is the validator's audit of what it actually loaded or found
+absent, not an input allowlist or proof that the model inspected those files;
+the reliability-impact coverage entry is the only one with a neighbor check,
+and that check is name/source presence, not proof of inspection; and evidence quote matching strips leading whitespace per
+line (a whitespace-only line compares as empty) while all other content,
+including internal and trailing whitespace, must match exactly.

@@ -73,6 +73,7 @@ function makeRig(files: { base?: string; head?: string } = {}): Rig {
   };
   const http = (request: HttpRequest): HttpResponse => {
     if (request.path.startsWith('/repos/devrev/sentinel/statuses/')) return { status: 201, json: {} };
+    if (request.path.startsWith('/repos/devrev/sentinel/issues/') && request.method === 'GET') return { status: 200, json: [] };
     if (request.method === 'POST') { posts.push(request); return { status: 201, json: { id: 1 } }; }
     if (request.path.startsWith('/repos/devrev/sentinel/pulls/')) {
       return { status: 200, json: { number: 17, state: 'open', base: { ref: 'staging', sha: baseSha }, head: { sha: headSha, repo: { full_name: REPO } } } };
@@ -376,6 +377,7 @@ function makeDispatchRig(overrides: DispatchOverrides = {}, files: { base?: stri
         rig.statuses.push({ state: String((request.body as { state: string }).state), sha: request.path.split('/statuses/')[1], body: request.body as Record<string, unknown> });
         return { status: 201, json: {} };
       }
+      if (request.path.startsWith('/repos/devrev/sentinel/issues/') && request.method === 'GET') return { status: 200, json: [] };
       if (request.method === 'POST') { rig.posts.push(request); return { status: 201, json: { id: 1 } }; }
       if (request.path.startsWith('/repos/devrev/sentinel/pulls/')) return { status: 200, json: pull };
       return { status: 200, json: run };
@@ -603,7 +605,7 @@ test('finalize publishes literal markdown with untrusted values in code spans an
   assert.match(body, /\*\*Findings:\*\* 1 blocker\n- \[blocker\] `Synthetic prior blocker claude b \[link\]\(https:\/\/example\.test\)` \(`src\/action\.ts`:1\)/);
   assert.doesNotMatch(body, /Synthetic unresolved finding|blocking-state fixture/, 'compact summary omits explanation and impact prose');
   assert.doesNotMatch(body, /@claude|<b>/, 'mention and HTML characters are stripped from values');
-  assert.match(body, /\n_Synthetic\/offline artifacts are never operational approvals\. This check is a required review gate, not a merge decision\._\n<!-- sentinel-review -->\n$/);
+  assert.match(body, /\n_Synthetic\/offline artifacts are never operational approvals\. This staging POC reports a review result, not a merge decision\. Required-check enforcement needs separate verification\._\n<!-- sentinel-review -->\n$/);
 });
 
 test('finalize updates an existing sticky comment and fails closed when the lookup fails', async (): Promise<void> => {
@@ -615,7 +617,7 @@ test('finalize updates an existing sticky comment and fails closed when the look
       findings: [], reconciliations: [],
     });
   };
-  const drive = async (comments: HttpResponse): Promise<{ rig: DispatchRig; issueCalls: HttpRequest[]; outcome: string }> => {
+  const drive = async (comments: HttpResponse | ((page: number) => HttpResponse)): Promise<{ rig: DispatchRig; issueCalls: HttpRequest[]; outcome: string }> => {
     const rig = makeDispatchRig();
     assert.equal(await runActionHost('reserve', { ...dispatchOptions(rig), out: rig.preparedDir }, rig.deps), 0);
     passReport(rig);
@@ -624,7 +626,13 @@ test('finalize updates an existing sticky comment and fails closed when the look
     rig.deps.http = (request: HttpRequest): HttpResponse => {
       if (request.path.startsWith('/repos/devrev/sentinel/issues/')) {
         issueCalls.push(request);
-        if (request.method === 'GET') return comments;
+        if (request.method === 'GET') {
+          if (typeof comments === 'function') {
+            const pageMatch = /&page=(\d+)$/.exec(request.path);
+            return comments(pageMatch ? Number(pageMatch[1]) : 1);
+          }
+          return comments;
+        }
         if (request.method === 'POST') return { status: 201, json: { id: 50 } };
         return { status: 200, json: { id: 42 } };
       }
@@ -666,6 +674,116 @@ test('finalize updates an existing sticky comment and fails closed when the look
     const { rig, issueCalls, outcome } = await drive({ status: 403, json: {} });
     assert.match(outcome, /^err:comment lookup failed with status 403/, outcome);
     assert.equal(issueCalls.filter((call) => call.method !== 'GET').length, 0);
+    const output = existsSync(rig.env.GITHUB_OUTPUT as string) ? readFileSync(rig.env.GITHUB_OUTPUT as string, 'utf8') : '';
+    assert.equal(output.includes('canonical_decision'), false);
+  }
+
+  const fullPage = (extra: Record<string, unknown>[] = []): Record<string, unknown>[] => [
+    { id: 5, body: 'injected <!-- sentinel-review -->', user: { login: 'pr-author' } },
+    ...extra,
+    ...Array.from({ length: 100 - 1 - extra.length }, (_v, i) => ({ id: 1000 + i, body: 'noise', user: { login: 'someone' } })),
+  ];
+
+  // A full first page with only an untrusted marker keeps paginating; the
+  // eligible marker on page 2 is patched, no POST is issued.
+  {
+    const { issueCalls, outcome } = await drive((page) => ({
+      status: 200,
+      json: page === 1 ? fullPage() : [{ id: 42, body: 'stale <!-- sentinel-review -->', user: { login: 'github-actions[bot]' } }],
+    }));
+    assert.equal(outcome, 'code-0');
+    assert.deepEqual(issueCalls.map((call) => `${call.method} ${call.path}`), [
+      'GET /repos/devrev/sentinel/issues/17/comments?per_page=100',
+      'GET /repos/devrev/sentinel/issues/17/comments?per_page=100&page=2',
+      'PATCH /repos/devrev/sentinel/issues/comments/42',
+    ]);
+  }
+
+  // A full page one then a short page two with no eligible marker publishes
+  // exactly one POST only after both pages were fetched.
+  {
+    const { issueCalls, outcome } = await drive((page) => ({ status: 200, json: page === 1 ? fullPage() : [{ id: 9, body: 'tail', user: { login: 'someone' } }] }));
+    assert.equal(outcome, 'code-0');
+    assert.deepEqual(issueCalls.map((call) => `${call.method} ${call.path}`), [
+      'GET /repos/devrev/sentinel/issues/17/comments?per_page=100',
+      'GET /repos/devrev/sentinel/issues/17/comments?per_page=100&page=2',
+      'POST /repos/devrev/sentinel/issues/17/comments',
+    ]);
+  }
+
+  // A full page one followed by an empty page two terminates the walk.
+  {
+    const { issueCalls, outcome } = await drive((page) => ({ status: 200, json: page === 1 ? fullPage() : [] }));
+    assert.equal(outcome, 'code-0');
+    assert.equal(issueCalls.filter((call) => call.method === 'GET').length, 2);
+    assert.equal(issueCalls.filter((call) => call.method === 'POST').length, 1);
+  }
+
+  // An eligible marker found on a full page still stops the walk: no page 2
+  // request is issued.
+  {
+    const { issueCalls, outcome } = await drive((page) => ({
+      status: 200,
+      json: page === 1 ? fullPage([{ id: 42, body: 'stale <!-- sentinel-review -->', user: { login: 'github-actions[bot]' } }]) : [{ id: 9, body: 'never fetched', user: { login: 'someone' } }],
+    }));
+    assert.equal(outcome, 'code-0');
+    assert.deepEqual(issueCalls.map((call) => `${call.method} ${call.path}`), [
+      'GET /repos/devrev/sentinel/issues/17/comments?per_page=100',
+      'PATCH /repos/devrev/sentinel/issues/comments/42',
+    ]);
+  }
+
+  // A failed or malformed later page fails closed: no summary, no review, no
+  // terminal success, and no decision output.
+  for (const [name, second] of [
+    ['403', { status: 403, json: {} } as HttpResponse],
+    ['malformed', { status: 200, json: { not: 'an array' } } as HttpResponse],
+  ] as [string, HttpResponse][]) {
+    const { rig, issueCalls, outcome } = await drive((page) => (page === 1 ? { status: 200, json: fullPage() } : second));
+    assert.match(outcome, /^err:/, `${name} must reject, got ${outcome}`);
+    assert.equal(issueCalls.filter((call) => call.method !== 'GET').length, 0, name);
+    assert.equal(rig.posts.filter((call) => call.path === '/repos/devrev/sentinel/pulls/17/reviews').length, 0, name);
+    assert.equal(rig.statuses.every((status) => status.state !== 'success'), true, name);
+    const output = existsSync(rig.env.GITHUB_OUTPUT as string) ? readFileSync(rig.env.GITHUB_OUTPUT as string, 'utf8') : '';
+    assert.equal(output.includes('canonical_decision'), false, name);
+  }
+
+  // A non-array payload on the very first page rejects before any write.
+  {
+    const { rig, issueCalls, outcome } = await drive({ status: 200, json: { not: 'an array' } });
+    assert.match(outcome, /^err:comment lookup returned a malformed payload/, outcome);
+    assert.equal(issueCalls.filter((call) => call.method !== 'GET').length, 0);
+    assert.equal(rig.posts.filter((call) => call.path === '/repos/devrev/sentinel/pulls/17/reviews').length, 0);
+    assert.equal(rig.statuses.every((status) => status.state !== 'success'), true);
+    const output = existsSync(rig.env.GITHUB_OUTPUT as string) ? readFileSync(rig.env.GITHUB_OUTPUT as string, 'utf8') : '';
+    assert.equal(output.includes('canonical_decision'), false);
+  }
+
+  // Full pages one and two without an eligible marker keep walking; the
+  // marker on page three is patched and no POST is issued.
+  {
+    const { issueCalls, outcome } = await drive((page) => ({
+      status: 200,
+      json: page < 3 ? fullPage() : [{ id: 42, body: 'stale <!-- sentinel-review -->', user: { login: 'github-actions[bot]' } }],
+    }));
+    assert.equal(outcome, 'code-0');
+    assert.deepEqual(issueCalls.map((call) => `${call.method} ${call.path}`), [
+      'GET /repos/devrev/sentinel/issues/17/comments?per_page=100',
+      'GET /repos/devrev/sentinel/issues/17/comments?per_page=100&page=2',
+      'GET /repos/devrev/sentinel/issues/17/comments?per_page=100&page=3',
+      'PATCH /repos/devrev/sentinel/issues/comments/42',
+    ]);
+  }
+
+  // Twenty full pages with no eligible marker hits the bound: exactly 20
+  // GETs, then rejection with no writes and no decision.
+  {
+    const { rig, issueCalls, outcome } = await drive(() => ({ status: 200, json: fullPage() }));
+    assert.match(outcome, /page limit/, outcome);
+    assert.equal(issueCalls.filter((call) => call.method === 'GET').length, 20);
+    assert.equal(issueCalls.filter((call) => call.method !== 'GET').length, 0);
+    assert.equal(rig.posts.filter((call) => call.path === '/repos/devrev/sentinel/pulls/17/reviews').length, 0);
+    assert.equal(rig.statuses.every((status) => status.state !== 'success'), true);
     const output = existsSync(rig.env.GITHUB_OUTPUT as string) ? readFileSync(rig.env.GITHUB_OUTPUT as string, 'utf8') : '';
     assert.equal(output.includes('canonical_decision'), false);
   }

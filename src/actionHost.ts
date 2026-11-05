@@ -549,6 +549,7 @@ async function stageCapture(deps: HostDeps, options: Record<string, string>): Pr
 }
 
 const COMMENT_MARKER = '<!-- sentinel-review -->';
+const COMMENT_PAGE_LIMIT = 20;
 const COMMENT_AUTHOR = 'github-actions[bot]';
 const UNTRUSTED_FIELD_LIMIT = 500;
 
@@ -597,7 +598,7 @@ export function renderSummary(decision: GateDecision, runId: string, runUrl: str
     '',
     `**Run:** ${codeSpan(runId)} · [workflow run](${runUrl})`,
     '',
-    '_Synthetic/offline artifacts are never operational approvals. This check is a required review gate, not a merge decision._',
+    '_Synthetic/offline artifacts are never operational approvals. This staging POC reports a review result, not a merge decision. Required-check enforcement needs separate verification._',
     COMMENT_MARKER,
   );
   return `${lines.join('\n')}\n`;
@@ -847,21 +848,27 @@ async function stageFinalize(deps: HostDeps, options: Record<string, string>): P
     });
   }
   const commentBody = renderSummary(decision, ctx.runId, `https://github.com/devrev/sentinel/actions/runs/${deps.env.GITHUB_RUN_ID}`);
-  const comments = await deps.http({
-    method: 'GET',
-    path: `/repos/${REPOSITORY}/issues/${String(ctx.pullRequest)}/comments?per_page=100`,
-  });
-  require(comments.status === 200, `comment lookup failed with status ${comments.status}`);
   // A marker alone proves nothing: only a marker comment authored by this
   // workflow's token is eligible for update, so injected copies can neither be
-  // hijacked nor stall publication.
+  // hijacked nor stall publication. The lookup paginates while pages come back
+  // full and fails closed on any failed or malformed page.
   let existingId: number | null = null;
-  for (const comment of Array.isArray(comments.json) ? comments.json : []) {
-    if (!object(comment) || typeof comment.id !== 'number' || !Number.isSafeInteger(comment.id)) continue;
-    if (typeof comment.body !== 'string' || !comment.body.includes(COMMENT_MARKER)) continue;
-    if (!object(comment.user) || comment.user.login !== COMMENT_AUTHOR) continue;
-    existingId = comment.id;
-    break;
+  for (let page = 1; existingId === null; page += 1) {
+    const comments = await deps.http({
+      method: 'GET',
+      path: `/repos/${REPOSITORY}/issues/${String(ctx.pullRequest)}/comments?per_page=100${page === 1 ? '' : `&page=${String(page)}`}`,
+    });
+    require(comments.status === 200, `comment lookup failed with status ${comments.status}`);
+    require(Array.isArray(comments.json), 'comment lookup returned a malformed payload');
+    for (const comment of comments.json) {
+      if (!object(comment) || typeof comment.id !== 'number' || !Number.isSafeInteger(comment.id)) continue;
+      if (typeof comment.body !== 'string' || !comment.body.includes(COMMENT_MARKER)) continue;
+      if (!object(comment.user) || comment.user.login !== COMMENT_AUTHOR) continue;
+      existingId = comment.id;
+      break;
+    }
+    if (comments.json.length < 100) break;
+    require(page < COMMENT_PAGE_LIMIT, 'comment lookup exceeded the page limit');
   }
   const publish = existingId === null
     ? await deps.http({

@@ -84,6 +84,21 @@ test('incorrect citation coordinates are repairable while exact supported citati
   assert.equal(inspectModelResponse(response(report), snapshot, previous, loaded.policy).accepted, true);
 });
 
+test('a reconciliation citation-only failure is repairable through the title-form reason', (): void => {
+  const { loaded, snapshot, previous, report } = fixture();
+  const prior = structuredClone(report.findings[0]);
+  previous.openFindings = [prior];
+  const badEvidence = structuredClone(prior.introducedBy);
+  badEvidence.startLine = 99;
+  badEvidence.endLine = 99;
+  report.reconciliations = [{
+    findingId: 'F-setup', outcome: 'open', rationale: 'Still applies.', evidence: [badEvidence],
+  }];
+  const inspection = inspectModelResponse(response(report), snapshot, previous, loaded.policy);
+  assert.equal(inspection.accepted, false);
+  assert.equal(inspection.repairable, true);
+});
+
 test('identity, coverage, schema, reviewer limitations, and incomplete results cannot request repair', (): void => {
   for (const mutate of [
     (report: ReviewReport): void => { report.identity.headSha = 'b'.repeat(40); },
