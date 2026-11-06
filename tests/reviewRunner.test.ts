@@ -28,7 +28,7 @@ function parentWith(parts: number): { snapshot: ReviewSnapshot; loaded: ReturnTy
     identity: { repository: ALLOWED_REPOSITORY, pullRequest: 7, headSha: 'a'.repeat(40), baseSha: 'b'.repeat(40), mergeBaseSha: 'b'.repeat(40), policyDigest: '', model: 'global.anthropic.claude-sonnet-5-5', runId: 'r1' },
     previousHeadSha: null,
     changes: [{ path: 'src/a.ts', status: 'modified' }],
-    size: { changedLines: 1, warnChangedLines: 800, blockChangedLines: 1500, outcome: 'within_threshold' },
+    size: { changedLines: 1, blockChangedLines: 1500 },
     files,
     dependencyEdges: edges,
     contextPlan: { strategy: 'symbol-aware-reverse-v1', selections: [{ path: 'src/a.ts', reasons: ['changed'] }], fallbacks: [] },

@@ -99,7 +99,7 @@ This specification does not choose a custom MCP server or graph store. Choose th
 
 ## 5. Policy limits and state compatibility
 
-Retain current repository allowlist, model identity, blocking rules, cumulative changed-line warning/block thresholds, and diff-byte limit. No numeric values change in this specification. Do not automatically add the review-system repository to the reviewed-repository allowlist just because the tooling moved into it.
+Retain current repository allowlist, model identity, blocking rules, cumulative changed-line block threshold, and diff-byte limit. No numeric values change in this specification. Do not automatically add the review-system repository to the reviewed-repository allowlist just because the tooling moved into it.
 
 The current `maxFiles`, `maxSourceBytes`, and `maxPartSourceBytes` measure captured packet content. Their meaning does not automatically transfer to tool-assisted investigation. An approved mapping to agent retrieval limits is required before executable agent preparation can authorize a run; do not reuse those names with silently different semantics, disable them, or claim the context limit disappeared.
 

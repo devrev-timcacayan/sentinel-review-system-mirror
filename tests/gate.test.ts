@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { DIMENSIONS } from '../src/contracts.ts';
 import type { Evidence, Finding, ReviewLedger, ReviewPolicy, ReviewReport, ReviewSnapshot } from '../src/contracts.ts';
-import { evaluateReview } from '../src/gate.ts';
+import { evaluateReview, evaluateSingleReview } from '../src/gate.ts';
+import type { FixedEvidenceOutsideScope, ResolvedBlockerOverlap } from '../src/gate.ts';
 
 const POLICY: ReviewPolicy = JSON.parse(readFileSync(new URL('../policy/review-system.json', import.meta.url), 'utf8')) as ReviewPolicy;
 const FIRST_SHA = 'a'.repeat(40);
@@ -43,7 +44,7 @@ function fixture(): { snapshot: ReviewSnapshot; report: ReviewReport; previous: 
     },
     previousHeadSha: null,
     changes: [{ path: 'src/action.ts', status: 'modified' }],
-    size: { changedLines: 2, warnChangedLines: 800, blockChangedLines: 1500, outcome: 'within_threshold' },
+    size: { changedLines: 2, blockChangedLines: 1500 },
     files: [
       { path: 'src/action.ts', revision: 'base', content: 'export const required = true;\n' },
       { path: 'src/action.ts', revision: 'head', content: 'export const required = false;\n' },
@@ -91,9 +92,9 @@ test('complete structurally consistent review can pass without compulsory critic
 
 test('a forged oversized or inconsistent size assessment cannot pass', (): void => {
   for (const size of [
-    { changedLines: 1501, warnChangedLines: 800, blockChangedLines: 1500, outcome: 'split_recommended' as const },
-    { changedLines: 801, warnChangedLines: 800, blockChangedLines: 1500, outcome: 'within_threshold' as const },
-    { changedLines: 2, warnChangedLines: 900, blockChangedLines: 1500, outcome: 'within_threshold' as const },
+    { changedLines: 1501, blockChangedLines: 1500 },
+    { changedLines: 1500, blockChangedLines: 900 },
+    { changedLines: 2, blockChangedLines: 0 },
   ]) {
     const { snapshot, report, previous } = fixture();
     snapshot.size = size;
@@ -253,9 +254,29 @@ test('a carried finding blocks even when its affected source did not change in t
   assert.equal(evaluateReview(snapshot, report, previous, POLICY).status, 'changes_required');
 });
 
-test('a previous finding requires code evidence to close', (): void => {
+const PRIOR_SHA = 'e'.repeat(40);
+
+// A previous review exists, so the snapshot carries a real previous-head
+// delta: one line in src/action.ts changed between the prior head and this one.
+function priorFixture(): { snapshot: ReviewSnapshot; report: ReviewReport; previous: ReviewLedger } {
   const { snapshot, report, previous } = fixture();
   previous.openFindings = [blocker()];
+  previous.lastHeadSha = PRIOR_SHA;
+  snapshot.previousHeadSha = PRIOR_SHA;
+  snapshot.deltaDiff = [
+    'diff --git a/src/action.ts b/src/action.ts',
+    '--- a/src/action.ts',
+    '+++ b/src/action.ts',
+    '@@ -1,1 +1,1 @@',
+    '-export const required = true;',
+    '+export const required = false;',
+    '',
+  ].join('\n');
+  return { snapshot, report, previous };
+}
+
+test('a previous finding requires code evidence to close', (): void => {
+  const { snapshot, report, previous } = priorFixture();
   report.reconciliations = [{
     findingId: 'F-setup',
     outcome: 'fixed',
@@ -353,4 +374,340 @@ test('gate evaluation does not mutate report or previous findings', (): void => 
   const before = structuredClone({ snapshot, report, previous });
   evaluateReview(snapshot, report, previous, POLICY);
   assert.deepEqual({ snapshot, report, previous }, before);
+});
+
+test('a withdrawal citing code outside the finding cannot retire a blocker', (): void => {
+  const { snapshot, report, previous } = fixture();
+  previous.openFindings = [blocker()];
+  snapshot.changes.push({ path: 'src/other.ts', status: 'modified' });
+  snapshot.files.push(
+    { path: 'src/other.ts', revision: 'base', content: 'export const other = 1;\n' },
+    { path: 'src/other.ts', revision: 'head', content: 'export const other = 2;\n' },
+  );
+  report.coverage.push(...DIMENSIONS.map((dimension) => ({
+    path: 'src/other.ts', dimension, assessment: 'reviewed' as const, rationale: 'Reviewed.', relatedPaths: [],
+  })));
+  report.reconciliations = [{
+    findingId: 'F-setup', outcome: 'withdrawn', rationale: 'Claimed obsolete.',
+    evidence: [{ path: 'src/other.ts', revision: 'head', startLine: 1, endLine: 1, quote: 'export const other = 2;' }],
+  }];
+  const decision = evaluateReview(snapshot, report, previous, POLICY);
+  assert.equal(decision.status, 'incomplete');
+  assert.match(decision.reasons[0], /withdraws it without evidence on the finding's code/);
+  assert.equal(decision.ledger.openFindings[0].id, 'F-setup');
+});
+
+// Known gap until a later batch binds author /sentinel recheck replies: a
+// withdrawal citing any line in the finding's file is still accepted.
+test('a withdrawal citing the finding file is still accepted (known gap until recheck)', (): void => {
+  const { snapshot, report, previous } = fixture();
+  previous.openFindings = [blocker()];
+  report.reconciliations = [{ findingId: 'F-setup', outcome: 'withdrawn', rationale: 'Acceptable design.', evidence: [evidence()] }];
+  assert.equal(evaluateReview(snapshot, report, previous, POLICY).status, 'pass');
+});
+
+test('a fixed outcome requires a previous-head delta', (): void => {
+  const { snapshot, report, previous } = fixture();
+  previous.openFindings = [blocker()];
+  report.reconciliations = [{ findingId: 'F-setup', outcome: 'fixed', rationale: 'Claimed fixed.', evidence: [evidence()] }];
+  const decision = evaluateReview(snapshot, report, previous, POLICY);
+  assert.equal(decision.status, 'incomplete');
+  assert.match(decision.reasons[0], /marks it fixed but no previous-head delta exists/);
+});
+
+test('a fix requires evidence on lines changed since the last reviewed head', (): void => {
+  const { snapshot, report, previous } = priorFixture();
+  snapshot.deltaDiff = [
+    'diff --git a/src/action.ts b/src/action.ts',
+    '--- a/src/action.ts',
+    '+++ b/src/action.ts',
+    '@@ -2,1 +2,1 @@',
+    '-old',
+    '+new',
+    '',
+  ].join('\n');
+  report.reconciliations = [{
+    findingId: 'F-setup', outcome: 'fixed', rationale: 'Claimed fixed.',
+    evidence: [evidence()],
+  }];
+  const decision = evaluateReview(snapshot, report, previous, POLICY);
+  assert.equal(decision.status, 'incomplete');
+  assert.match(decision.reasons[0], /marks it fixed without evidence on lines changed since the last reviewed head/);
+});
+
+test('a fix citing a delta-changed line in the finding file is accepted', (): void => {
+  const { snapshot, report, previous } = priorFixture();
+  report.reconciliations = [{ findingId: 'F-setup', outcome: 'fixed', rationale: 'Repaired.', evidence: [evidence()] }];
+  assert.equal(evaluateReview(snapshot, report, previous, POLICY).status, 'pass');
+});
+
+test('a fix may cite a changed helper line plus binding evidence on the finding file', (): void => {
+  const { snapshot, report, previous } = priorFixture();
+  snapshot.deltaDiff += [
+    'diff --git a/src/helper.ts b/src/helper.ts',
+    '--- a/src/helper.ts',
+    '+++ b/src/helper.ts',
+    '@@ -1,1 +1,1 @@',
+    '-export const helper = 1;',
+    '+export const helper = 2;',
+    '',
+  ].join('\n');
+  snapshot.files.push({ path: 'src/helper.ts', revision: 'head', content: 'export const helper = 2;\n' });
+  report.reconciliations = [{
+    findingId: 'F-setup', outcome: 'fixed', rationale: 'The mechanism moved into the helper.',
+    evidence: [{ path: 'src/helper.ts', revision: 'head', startLine: 1, endLine: 1, quote: 'export const helper = 2;' }, evidence()],
+  }];
+  assert.equal(evaluateReview(snapshot, report, previous, POLICY).status, 'pass');
+});
+
+test('a fix citing only changed helper lines cannot clear the finding', (): void => {
+  const { snapshot, report, previous } = priorFixture();
+  snapshot.deltaDiff += [
+    'diff --git a/src/helper.ts b/src/helper.ts',
+    '--- a/src/helper.ts',
+    '+++ b/src/helper.ts',
+    '@@ -1,1 +1,1 @@',
+    '-export const helper = 1;',
+    '+export const helper = 2;',
+    '',
+  ].join('\n');
+  snapshot.files.push({ path: 'src/helper.ts', revision: 'head', content: 'export const helper = 2;\n' });
+  report.reconciliations = [{
+    findingId: 'F-setup', outcome: 'fixed', rationale: 'Fixed elsewhere.',
+    evidence: [{ path: 'src/helper.ts', revision: 'head', startLine: 1, endLine: 1, quote: 'export const helper = 2;' }],
+  }];
+  const decision = evaluateReview(snapshot, report, previous, POLICY);
+  assert.equal(decision.status, 'incomplete');
+  assert.match(decision.reasons[0], /marks it fixed without evidence on the finding's code/);
+});
+
+test('a fix after a deletion-only change accepts the adjacent head line', (): void => {
+  const { snapshot, report, previous } = priorFixture();
+  snapshot.deltaDiff = [
+    'diff --git a/src/action.ts b/src/action.ts',
+    '--- a/src/action.ts',
+    '+++ b/src/action.ts',
+    '@@ -1,3 +1,1 @@',
+    ' export const required = false;',
+    '-export const extra1 = 1;',
+    '-export const extra2 = 2;',
+    '',
+  ].join('\n');
+  report.reconciliations = [{
+    findingId: 'F-setup', outcome: 'fixed', rationale: 'The bypass path was deleted.',
+    evidence: [evidence()],
+  }];
+  assert.equal(evaluateReview(snapshot, report, previous, POLICY).status, 'pass');
+});
+
+test('a fix on a file deleted in the delta accepts base evidence on that path', (): void => {
+  const { snapshot, report, previous } = priorFixture();
+  snapshot.changes[0].status = 'deleted';
+  snapshot.files = snapshot.files.filter((file) => file.path !== 'src/action.ts' || file.revision === 'base');
+  snapshot.deltaDiff = [
+    'diff --git a/src/action.ts b/src/action.ts',
+    '--- a/src/action.ts',
+    '+++ /dev/null',
+    '@@ -1,1 +0,0 @@',
+    '-export const required = true;',
+    '',
+  ].join('\n');
+  report.reconciliations = [{
+    findingId: 'F-setup', outcome: 'fixed', rationale: 'The offending file was removed.',
+    evidence: [evidence('src/action.ts', 'base')],
+  }];
+  const decision = evaluateReview(snapshot, report, previous, POLICY);
+  assert.equal(decision.status, 'pass', decision.reasons.join('\n'));
+  assert.deepEqual(decision.ledger.openFindings, []);
+});
+
+test('a fix on a renamed file accepts head evidence on the new path', (): void => {
+  const { snapshot, report, previous } = priorFixture();
+  snapshot.changes[0] = { path: 'src/new-action.ts', status: 'renamed', previousPath: 'src/action.ts' };
+  const head = snapshot.files.find((file) => file.path === 'src/action.ts' && file.revision === 'head');
+  assert.ok(head);
+  head.path = 'src/new-action.ts';
+  snapshot.deltaDiff = [
+    'diff --git a/src/action.ts b/src/new-action.ts',
+    '--- a/src/action.ts',
+    '+++ b/src/new-action.ts',
+    '@@ -1,1 +1,1 @@',
+    '-export const required = true;',
+    '+export const required = false;',
+    '',
+  ].join('\n');
+  for (const entry of report.coverage) entry.path = 'src/new-action.ts';
+  report.reconciliations = [{
+    findingId: 'F-setup', outcome: 'fixed', rationale: 'The mechanism moved and was repaired.',
+    evidence: [evidence('src/new-action.ts')],
+  }];
+  const decision = evaluateReview(snapshot, report, previous, POLICY);
+  assert.equal(decision.status, 'pass', decision.reasons.join('\n'));
+});
+
+test('a withdrawn blocker cannot reappear under any rule at a matching or nearby site', (): void => {
+  const { snapshot, report, previous } = priorFixture();
+  report.findings = [{ ...blocker(), id: 'F-new', ruleId: 'novel', severity: 'advisory' }];
+  report.reconciliations = [{ findingId: 'F-setup', outcome: 'withdrawn', rationale: 'Withdrawn.', evidence: [evidence()] }];
+  const decision = evaluateReview(snapshot, report, previous, POLICY);
+  assert.equal(decision.status, 'incomplete');
+  assert.match(decision.reasons[0], /re-raises withdrawn blocker ".*" at lower severity/);
+  assert.equal(decision.ledger.openFindings[0].severity, 'blocker');
+});
+
+test('a withdrawn blocker re-raised within ten shifted lines is refused', (): void => {
+  const { snapshot, report, previous } = priorFixture();
+  const headFile = snapshot.files.find((file) => file.path === 'src/action.ts' && file.revision === 'head');
+  assert.ok(headFile);
+  headFile.content = `${['export const required = false;', ...Array.from({ length: 29 }, (_v, i) => `export const filler${i + 2} = ${i + 2};`)].join('\n')}\n`;
+  // Fourteen inserted lines push the prior line-1 citation to line 15.
+  snapshot.deltaDiff = [
+    'diff --git a/src/action.ts b/src/action.ts',
+    '--- a/src/action.ts',
+    '+++ b/src/action.ts',
+    '@@ -0,0 +1,14 @@',
+    ...Array.from({ length: 14 }, (_v, i) => `+export const filler${i + 2} = ${i + 2};`),
+    '',
+  ].join('\n');
+  report.findings = [{
+    ...blocker(), id: 'F-new', ruleId: 'SR-004', severity: 'advisory',
+    introducedBy: { path: 'src/action.ts', revision: 'head', startLine: 20, endLine: 20, quote: 'export const filler20 = 20;' },
+    evidence: [{ path: 'src/action.ts', revision: 'head', startLine: 20, endLine: 20, quote: 'export const filler20 = 20;' }],
+  }];
+  report.reconciliations = [{ findingId: 'F-setup', outcome: 'withdrawn', rationale: 'Withdrawn.', evidence: [evidence()] }];
+  const decision = evaluateReview(snapshot, report, previous, POLICY);
+  assert.equal(decision.status, 'incomplete');
+  assert.match(decision.reasons[0], /re-raises withdrawn blocker/);
+
+  const { snapshot: s2, report: r2, previous: p2 } = priorFixture();
+  const head2 = s2.files.find((file) => file.path === 'src/action.ts' && file.revision === 'head');
+  assert.ok(head2);
+  head2.content = headFile.content;
+  s2.deltaDiff = snapshot.deltaDiff;
+  r2.findings = [{
+    ...blocker(), id: 'F-new', ruleId: 'SR-004', severity: 'advisory',
+    introducedBy: { path: 'src/action.ts', revision: 'head', startLine: 27, endLine: 27, quote: 'export const filler27 = 27;' },
+    evidence: [{ path: 'src/action.ts', revision: 'head', startLine: 27, endLine: 27, quote: 'export const filler27 = 27;' }],
+  }];
+  r2.reconciliations = [{ findingId: 'F-setup', outcome: 'withdrawn', rationale: 'Withdrawn.', evidence: [evidence()] }];
+  assert.equal(evaluateReview(s2, r2, p2, POLICY).status, 'pass');
+});
+
+test('a resolved blocker cannot be re-raised under a new id at lower severity', (): void => {
+  for (const outcome of ['fixed', 'withdrawn'] as const) {
+    const { snapshot, report, previous } = priorFixture();
+    report.findings = [{ ...blocker(), id: 'F-new', severity: 'advisory' }];
+    report.reconciliations = [{ findingId: 'F-setup', outcome, rationale: 'Resolved.', evidence: [evidence()] }];
+    const decision = evaluateReview(snapshot, report, previous, POLICY);
+    assert.equal(decision.status, 'incomplete', outcome);
+    assert.match(decision.reasons[0], outcome === 'fixed' ? /overlaps resolved blocker ".*" and cannot lower its severity/ : /re-raises withdrawn blocker ".*" at lower severity/, outcome);
+    assert.equal(decision.ledger.openFindings[0].severity, 'blocker');
+  }
+});
+
+test('a fresh blocker on the same mechanism is allowed after a fix', (): void => {
+  const { snapshot, report, previous } = priorFixture();
+  report.findings = [{ ...blocker(), id: 'F-new' }];
+  report.reconciliations = [{ findingId: 'F-setup', outcome: 'fixed', rationale: 'The original defect was repaired.', evidence: [evidence()] }];
+  const decision = evaluateReview(snapshot, report, previous, POLICY);
+  assert.equal(decision.status, 'changes_required');
+  assert.equal(decision.ledger.openFindings[0].id, 'F-new');
+});
+
+test('an allowed different-rule overlap after a fix is recorded as a resolution observation', (): void => {
+  for (const variant of ['near', 'quote'] as const) {
+    const { snapshot, report, previous } = priorFixture();
+    const advisory = { ...blocker(), id: 'F-new', ruleId: 'SR-004', severity: 'advisory' as const };
+    if (variant === 'near') {
+      const headFile = snapshot.files.find((file) => file.path === 'src/action.ts' && file.revision === 'head');
+      assert.ok(headFile);
+      headFile.content = `export const required = false;\n${Array.from({ length: 8 }, (_v, i) => `export const filler${i + 2} = ${i + 2};`).join('\n')}\n`;
+      advisory.introducedBy = { path: 'src/action.ts', revision: 'head', startLine: 6, endLine: 6, quote: 'export const filler6 = 6;' };
+      advisory.evidence = [advisory.introducedBy];
+    }
+    report.findings = [advisory];
+    report.reconciliations = [{ findingId: 'F-setup', outcome: 'fixed', rationale: 'Repaired.', evidence: [evidence()] }];
+    const observations = { allowedFixedBlockerOverlaps: [] as ResolvedBlockerOverlap[], fixedEvidenceOutsideScope: [] as FixedEvidenceOutsideScope[] };
+    const decision = evaluateSingleReview(snapshot, report, previous, POLICY, observations);
+    assert.equal(decision.status, 'pass', `${variant}: ${decision.reasons.join('\n')}`);
+    assert.equal(observations.allowedFixedBlockerOverlaps.length, 1, variant);
+    assert.equal(observations.allowedFixedBlockerOverlaps[0].match, variant);
+    assert.equal(observations.allowedFixedBlockerOverlaps[0].priorFindingId, 'F-setup');
+    assert.equal(observations.allowedFixedBlockerOverlaps[0].findingId, 'F-new');
+  }
+});
+
+test('a same-rule advisory overlapping a fixed blocker after shifting is refused', (): void => {
+  const { snapshot, report, previous } = priorFixture();
+  const headFile = snapshot.files.find((file) => file.path === 'src/action.ts' && file.revision === 'head');
+  assert.ok(headFile);
+  headFile.content = `${['export const required = false;', ...Array.from({ length: 29 }, (_v, i) => `export const filler${i + 2} = ${i + 2};`)].join('\n')}\n`;
+  snapshot.deltaDiff = [
+    'diff --git a/src/action.ts b/src/action.ts',
+    '--- a/src/action.ts',
+    '+++ b/src/action.ts',
+    '@@ -0,0 +1,14 @@',
+    ...Array.from({ length: 14 }, (_v, i) => `+export const filler${i + 2} = ${i + 2};`),
+    '',
+  ].join('\n');
+  report.findings = [{
+    ...blocker(), id: 'F-new', severity: 'advisory',
+    introducedBy: { path: 'src/action.ts', revision: 'head', startLine: 15, endLine: 15, quote: 'export const filler15 = 15;' },
+    evidence: [{ path: 'src/action.ts', revision: 'head', startLine: 15, endLine: 15, quote: 'export const filler15 = 15;' }],
+  }];
+  report.reconciliations = [{ findingId: 'F-setup', outcome: 'fixed', rationale: 'Repaired.', evidence: [evidence()] }];
+  const decision = evaluateReview(snapshot, report, previous, POLICY);
+  assert.equal(decision.status, 'incomplete');
+  assert.match(decision.reasons[0], /overlaps resolved blocker ".*" and cannot lower its severity/);
+});
+
+test('changed-line evidence outside the finding scope is accepted and logged', (): void => {
+  const { snapshot, report, previous } = priorFixture();
+  snapshot.deltaDiff += [
+    'diff --git a/src/unrelated.ts b/src/unrelated.ts',
+    '--- a/src/unrelated.ts',
+    '+++ b/src/unrelated.ts',
+    '@@ -1,1 +1,1 @@',
+    '-export const u = 1;',
+    '+export const u = 2;',
+    '',
+  ].join('\n');
+  snapshot.files.push({ path: 'src/unrelated.ts', revision: 'head', content: 'export const u = 2;\n' });
+  report.reconciliations = [{
+    findingId: 'F-setup', outcome: 'fixed', rationale: 'The mechanism moved to an unrelated file.',
+    evidence: [{ path: 'src/unrelated.ts', revision: 'head', startLine: 1, endLine: 1, quote: 'export const u = 2;' }, evidence('tests/consumer.ts')],
+  }];
+  const observations = { allowedFixedBlockerOverlaps: [] as ResolvedBlockerOverlap[], fixedEvidenceOutsideScope: [] as FixedEvidenceOutsideScope[] };
+  const decision = evaluateSingleReview(snapshot, report, previous, POLICY, observations);
+  assert.equal(decision.status, 'pass', decision.reasons.join('\n'));
+  assert.equal(observations.fixedEvidenceOutsideScope.length, 1);
+  assert.equal(observations.fixedEvidenceOutsideScope[0].priorFindingId, 'F-setup');
+  assert.deepEqual(observations.fixedEvidenceOutsideScope[0].changedEvidence, [
+    { path: 'src/unrelated.ts', revision: 'head', startLine: 1, endLine: 1 },
+  ]);
+});
+
+test('changed-line evidence in a dependency neighbor or the finding file is not logged', (): void => {
+  for (const path of ['tests/consumer.ts', 'src/action.ts'] as const) {
+    const { snapshot, report, previous } = priorFixture();
+    if (path === 'tests/consumer.ts') {
+      snapshot.deltaDiff += [
+        'diff --git a/tests/consumer.ts b/tests/consumer.ts',
+        '--- a/tests/consumer.ts',
+        '+++ b/tests/consumer.ts',
+        '@@ -1,1 +1,1 @@',
+        '-export const required = true;',
+        '+export const required = false;',
+        '',
+      ].join('\n');
+    }
+    report.reconciliations = [{
+      findingId: 'F-setup', outcome: 'fixed', rationale: 'Repaired.',
+      evidence: [evidence(path)],
+    }];
+    const observations = { allowedFixedBlockerOverlaps: [] as ResolvedBlockerOverlap[], fixedEvidenceOutsideScope: [] as FixedEvidenceOutsideScope[] };
+    const decision = evaluateSingleReview(snapshot, report, previous, POLICY, observations);
+    assert.equal(decision.status, 'pass', `${path}: ${decision.reasons.join('\n')}`);
+    assert.deepEqual(observations.fixedEvidenceOutsideScope, [], path);
+  }
 });

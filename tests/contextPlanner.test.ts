@@ -206,7 +206,7 @@ test('plan evidence validates strictly and output is deterministic', (): void =>
 test('budget exhaustion remains an explicit incomplete result', (): void => {
   const repo = fixtureRepo();
   changed(repo, 'src/pages/computer/computerDesktop.page.ts', 'export class ComputerDesktopPage {\n  work(): void {}\n  bigger(): void {}\n}\n');
-  const loaded = loadTestPolicy({ contextPaths: [], limits: { maxFiles: 3, maxSourceBytes: 4_000_000, maxPartSourceBytes: 4_000_000, maxDiffBytes: 1_000_000, warnChangedLines: 800, blockChangedLines: 1500 } });
+  const loaded = loadTestPolicy({ contextPaths: [], limits: { maxFiles: 3, maxSourceBytes: 4_000_000, maxPartSourceBytes: 4_000_000, maxDiffBytes: 1_000_000, blockChangedLines: 1500 } });
   const snapshot = collectSnapshot(baseOptions(repo), loaded);
   assert.equal(snapshot.complete, false);
   assert.ok(snapshot.limitations.some((line) => line.includes('Context budget exhausted')));

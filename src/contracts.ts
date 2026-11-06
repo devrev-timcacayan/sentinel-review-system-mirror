@@ -40,9 +40,7 @@ export interface ContextPlan {
 
 export interface SizeAssessment {
   changedLines: number;
-  warnChangedLines: number;
   blockChangedLines: number;
-  outcome: 'within_threshold' | 'split_recommended';
 }
 
 export interface ReviewSnapshot {
@@ -154,7 +152,6 @@ export interface ReviewPolicy {
     maxSourceBytes: number;
     maxPartSourceBytes: number;
     maxDiffBytes: number;
-    warnChangedLines: number;
     blockChangedLines: number;
   };
   contextPaths: string[];

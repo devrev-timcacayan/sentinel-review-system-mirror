@@ -198,22 +198,47 @@ export function persistPrState(
   assertRealDir(resolved, 'state checkout');
   check(typeof options.token === 'string' && options.token.length > 0, 'a nonempty credential is required to persist state');
   const prsDir = path.join(resolved, 'prs');
-  if (lstatSync(prsDir, { throwIfNoEntry: false }) === undefined) mkdirSync(prsDir, { mode: 0o700 });
-  assertRealDir(prsDir, 'prs directory');
   const recordRel = `prs/${String(record.pullRequest)}.json`;
-  writeFileSync(indexFilePath(resolved), `${JSON.stringify(index, null, 2)}\n`, { mode: 0o600 });
-  writeFileSync(recordFilePath(resolved, record.pullRequest), `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
   const commitConfig = [
     '-c', 'user.name=sentinel-review',
     '-c', 'user.email=sentinel-review@users.noreply.github.com',
   ];
-  git(resolved, [...commitConfig, 'add', '--', 'index.json', recordRel]);
-  git(resolved, [...commitConfig, 'commit', '-m', options.message]);
-  git(resolved, ['push', 'origin', `HEAD:refs/heads/${STATE_BRANCH}`], {
-    env: {
-      GIT_CONFIG_COUNT: '1',
-      GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
-      GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${options.token}`).toString('base64')}`,
-    },
-  });
+  const writeState = (stateIndex: StateIndex): void => {
+    if (lstatSync(prsDir, { throwIfNoEntry: false }) === undefined) mkdirSync(prsDir, { mode: 0o700 });
+    assertRealDir(prsDir, 'prs directory');
+    writeFileSync(indexFilePath(resolved), `${JSON.stringify(stateIndex, null, 2)}\n`, { mode: 0o600 });
+    writeFileSync(recordFilePath(resolved, record.pullRequest), `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
+    git(resolved, [...commitConfig, 'add', '--', 'index.json', recordRel]);
+    git(resolved, [...commitConfig, 'commit', '-m', options.message]);
+  };
+  writeState(index);
+  // Rejection detection relies on git's C-locale stderr strings.
+  const pushEnv = {
+    LC_ALL: 'C',
+    LANG: 'C',
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
+    GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${options.token}`).toString('base64')}`,
+  };
+  // A rejected push means another run committed first. Rebase on the fetched
+  // tip only when it left this PR's record untouched; a same-PR conflict is a
+  // raced decision and must fail closed rather than merge.
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      git(resolved, ['push', 'origin', `HEAD:refs/heads/${STATE_BRANCH}`], { env: pushEnv });
+      return;
+    } catch (error) {
+      const message = (error as Error).message;
+      if (!/non-fast-forward|fetch first|\[rejected\]/.test(message) || attempt === 3) throw error;
+      git(resolved, ['fetch', 'origin', `refs/heads/${STATE_BRANCH}`], { env: pushEnv });
+      const drift = git(resolved, ['diff', '--name-only', 'HEAD^', 'FETCH_HEAD', '--', recordRel]);
+      check(drift === '', `state branch advanced with a concurrent update to ${recordRel}; refusing to merge same-PR state`);
+      git(resolved, ['reset', '--hard', 'FETCH_HEAD']);
+      const remoteIndex = validateStateIndex(readJsonFile(indexFilePath(resolved), 'index'));
+      const merged: StateIndex = remoteIndex.pullRequests.includes(record.pullRequest)
+        ? remoteIndex
+        : { ...remoteIndex, pullRequests: [...remoteIndex.pullRequests, record.pullRequest].sort((a: number, b: number): number => a - b) };
+      writeState(merged);
+    }
+  }
 }

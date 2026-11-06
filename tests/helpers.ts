@@ -119,7 +119,7 @@ export function makeSnapshotFixture(loaded: LoadedPolicy, options: StateFixtureO
     },
     previousHeadSha: options.previousHeadSha === undefined ? null : options.previousHeadSha,
     changes: [{ path: 'src/action.ts', status: 'modified' }],
-    size: { changedLines: 2, warnChangedLines: 800, blockChangedLines: 1500, outcome: 'within_threshold' },
+    size: { changedLines: 2, blockChangedLines: 1500 },
     files: [
       { path: 'src/action.ts', revision: 'base', content: 'export const required = true;\n' },
       { path: 'src/action.ts', revision: 'head', content: 'export const required = false;\n' },

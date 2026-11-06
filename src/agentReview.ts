@@ -14,7 +14,7 @@ import type {
 } from './agentContracts.ts';
 import { canonicalJson } from './partitionContract.ts';
 import { evaluateSingleReview, isReport } from './gate.ts';
-import type { ReviewEvaluationContext } from './gate.ts';
+import type { ResolutionObservations, ReviewEvaluationContext } from './gate.ts';
 import { loadPolicy } from './policy.ts';
 import { collectAgentMetadata, listAgentTree, readAgentSource } from './snapshot.ts';
 import type { LoadedPolicy } from './policy.ts';
@@ -183,7 +183,7 @@ interface SourceReadRecord {
   revision: 'base' | 'head';
   path: string;
   sha: string;
-  status: 'loaded' | 'absent';
+  status: 'loaded' | 'absent' | 'present';
   bytes: number;
 }
 
@@ -252,7 +252,7 @@ function validateCore(
   const { identity } = request;
   const limits = request.validationLimits;
   const ledger = options.priorState.ledger;
-  const budgetCounters = { files: 0, totalBytes: 0 };
+  const budgetCounters = { files: 0, capped: 0, totalBytes: 0 };
   const sourceReads: SourceReadRecord[] = [];
   const auditLimitations: string[] = [];
   const fail = (reason: string): ValidateAgentReviewResult =>
@@ -338,16 +338,32 @@ function validateCore(
   const need = (revision: 'head' | 'base', sourcePath: string): void => {
     required.set(`${revision}:${sourcePath}`, { revision, path: sourcePath });
   };
+  const changedKeys = new Set<string>();
   for (const change of request.changes) {
-    if (change.status !== 'deleted') need('head', change.path);
-    if (change.status !== 'added') need('base', change.previousPath ?? change.path);
+    if (change.status !== 'deleted') {
+      need('head', change.path);
+      changedKeys.add(`head:${change.path}`);
+    }
+    if (change.status !== 'added') {
+      need('base', change.previousPath ?? change.path);
+      changedKeys.add(`base:${change.previousPath ?? change.path}`);
+    }
   }
+  const availablePaths = new Set<string>();
   if (isReport(parsed)) {
     for (const entry of parsed.coverage) {
       for (const related of entry.relatedPaths) {
-        if (headTree.has(related)) need('head', related);
-        else if (baseTree.has(related)) need('base', related);
-        else auditLimitations.push(`Coverage related path ${related} is absent at head and merge base.`);
+        // Coverage context is verified by existence, not loaded into the cap.
+        if (availablePaths.has(related)) continue;
+        if (headTree.has(related)) {
+          availablePaths.add(related);
+          sourceReads.push({ revision: 'head', path: related, sha: revisionSha.head, status: 'present', bytes: 0 });
+        } else if (baseTree.has(related)) {
+          availablePaths.add(related);
+          sourceReads.push({ revision: 'base', path: related, sha: revisionSha.base, status: 'present', bytes: 0 });
+        } else {
+          auditLimitations.push(`Coverage related path ${related} is absent at head and merge base.`);
+        }
       }
     }
     const evidences = [
@@ -370,14 +386,18 @@ function validateCore(
         continue;
       }
       const bytes = Buffer.byteLength(content, 'utf8');
-      if (files.length + 1 > limits.maxFiles || budgetCounters.totalBytes + bytes > limits.maxSourceBytes) {
+      // Only evidence-only loads count against maxFiles; changed-file entries
+      // are always required. maxSourceBytes still bounds every load.
+      const capped = !changedKeys.has(`${item.revision}:${item.path}`);
+      if ((capped && budgetCounters.capped + 1 > limits.maxFiles) || budgetCounters.totalBytes + bytes > limits.maxSourceBytes) {
         throw new Error(
           `Offline source verification budget exceeded at ${item.revision}:${item.path} `
-          + `(${files.length + 1} sources / ${budgetCounters.totalBytes + bytes} bytes against maxFiles ${limits.maxFiles}, maxSourceBytes ${limits.maxSourceBytes}).`,
+          + `(${budgetCounters.capped + (capped ? 1 : 0)} capped sources / ${budgetCounters.totalBytes + bytes} bytes against maxFiles ${limits.maxFiles}, maxSourceBytes ${limits.maxSourceBytes}).`,
         );
       }
       files.push({ path: item.path, revision: item.revision, content });
       budgetCounters.files += 1;
+      if (capped) budgetCounters.capped += 1;
       budgetCounters.totalBytes += bytes;
       sourceReads.push({ revision: item.revision, path: item.path, sha: revisionSha[item.revision], status: 'loaded', bytes });
     }
@@ -400,9 +420,12 @@ function validateCore(
     complete: metadata.complete,
     limitations: metadata.limitations,
     partitionScope: undefined,
+    availablePaths: [...availablePaths].sort(),
+    deltaDiff: metadata.deltaDiff,
   };
-  const decision = evaluateSingleReview(context, parsed, priorState.ledger, loaded.policy);
-  return finish(decision, 'evaluated', sourceReads, auditLimitations, contextPaths);
+  const observations: ResolutionObservations = { allowedFixedBlockerOverlaps: [], fixedEvidenceOutsideScope: [] };
+  const decision = evaluateSingleReview(context, parsed, priorState.ledger, loaded.policy, observations);
+  return finish(decision, 'evaluated', sourceReads, auditLimitations, contextPaths, observations.allowedFixedBlockerOverlaps, observations.fixedEvidenceOutsideScope);
 
   function finish(
     finalDecision: GateDecision,
@@ -410,6 +433,8 @@ function validateCore(
     reads: SourceReadRecord[],
     limitations: string[],
     contextAvailability: { path: string; availableAtMergeBase: boolean }[] = [],
+    resolutionOverlaps: ResolutionObservations['allowedFixedBlockerOverlaps'] = [],
+    fixedEvidenceOutsideScope: ResolutionObservations['fixedEvidenceOutsideScope'] = [],
   ): ValidateAgentReviewResult {
     const outDir = createFreshOutDir(options.outDir);
     const envelope: AgentDecisionEnvelope = {
@@ -429,12 +454,15 @@ function validateCore(
       sourceReads: reads,
       budget: {
         sources: budgetCounters.files,
+        cappedSources: budgetCounters.capped,
         totalBytes: budgetCounters.totalBytes,
         maxFiles: limits.maxFiles,
         maxSourceBytes: limits.maxSourceBytes,
         maxReadBytes: limits.maxReadBytes,
       },
       contextPaths: contextAvailability,
+      resolutionOverlaps,
+      fixedEvidenceOutsideScope,
       limitations,
       decision: { status: finalDecision.status, reasons: finalDecision.reasons },
     };

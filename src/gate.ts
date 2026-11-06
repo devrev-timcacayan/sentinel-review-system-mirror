@@ -1,7 +1,10 @@
 import { DIMENSIONS } from './contracts.ts';
+import { changedAndPreviousPaths, parseDiffLines, shiftLineRange } from './diffLines.ts';
+import type { FileDelta } from './diffLines.ts';
 import { evaluatePartitionedReview } from './partitionGate.ts';
 import type {
   Coverage,
+  DependencyEdge,
   Evidence,
   Finding,
   GateDecision,
@@ -97,11 +100,9 @@ function isReconciliation(value: unknown): value is Reconciliation {
 
 function isSize(value: unknown): value is SizeAssessment {
   return isObject(value)
-    && hasKeys(value, ['changedLines', 'warnChangedLines', 'blockChangedLines', 'outcome'])
+    && hasKeys(value, ['changedLines', 'blockChangedLines'])
     && Number.isSafeInteger(value.changedLines) && Number(value.changedLines) >= 0
-    && Number.isSafeInteger(value.warnChangedLines) && Number(value.warnChangedLines) > 0
-    && Number.isSafeInteger(value.blockChangedLines) && Number(value.blockChangedLines) > 0
-    && ['within_threshold', 'split_recommended'].includes(String(value.outcome));
+    && Number.isSafeInteger(value.blockChangedLines) && Number(value.blockChangedLines) > 0;
 }
 
 function isPartitionScope(value: unknown): value is { manifestDigest: string; partitionId: string } {
@@ -137,8 +138,8 @@ function sameIdentity(left: ReviewIdentity, right: ReviewIdentity): boolean {
 // evidence cache, never a packet served to the model.
 export type ReviewEvaluationContext = Pick<
   ReviewSnapshot,
-  'identity' | 'previousHeadSha' | 'changes' | 'size' | 'files' | 'dependencyEdges' | 'complete' | 'limitations' | 'partitionScope'
->;
+  'identity' | 'previousHeadSha' | 'changes' | 'size' | 'files' | 'dependencyEdges' | 'complete' | 'limitations' | 'partitionScope' | 'deltaDiff'
+> & { availablePaths?: string[] };
 
 function evidenceExists(snapshot: ReviewEvaluationContext, evidence: Evidence): boolean {
   const source = snapshot.files.find((file): boolean => file.path === evidence.path && file.revision === evidence.revision);
@@ -153,6 +154,181 @@ function evidenceExists(snapshot: ReviewEvaluationContext, evidence: Evidence): 
 
 function duplicateValues(values: string[]): string[] {
   return values.filter((value: string, index: number): boolean => values.indexOf(value) !== index);
+}
+
+function normalizeQuote(quote: string): string {
+  return quote.split('\n').map((line: string): string => line.trimStart()).join('\n');
+}
+
+export interface PriorOverlapMatch {
+  path: string;
+  quoteMatch: boolean;
+  near: boolean;
+  strictOverlap: boolean;
+  priorLines: { startLine: number; endLine: number };
+  findingLines: { startLine: number; endLine: number };
+}
+
+const NEAR_LINE_DISTANCE = 10;
+
+function deltaEntryFor(delta: Map<string, FileDelta>, filePath: string): FileDelta | undefined {
+  const direct = delta.get(filePath);
+  if (direct !== undefined) return direct;
+  for (const entry of delta.values()) {
+    if (entry.oldPath === filePath) return entry;
+  }
+  return undefined;
+}
+
+// How a resolved prior finding's introduced location relates to a current
+// finding: same file after rename mapping, whether their introduced quotes
+// match after leading-indentation normalization (as in evidenceExists), the
+// prior range shifted through the previous-head delta, and how that shifted
+// range sits against the current range.
+export function matchResolvedFinding(
+  prior: Finding,
+  current: Finding,
+  renameTargets: Map<string, string>,
+  delta: Map<string, FileDelta> | null,
+): PriorOverlapMatch | null {
+  const introducedPath = (value: string): string => renameTargets.get(value) ?? value;
+  const path = introducedPath(prior.introducedBy.path);
+  if (path !== introducedPath(current.introducedBy.path)) return null;
+  const quoteMatch = normalizeQuote(prior.introducedBy.quote) === normalizeQuote(current.introducedBy.quote);
+  let priorLines = { startLine: prior.introducedBy.startLine, endLine: prior.introducedBy.endLine };
+  if (prior.introducedBy.revision === 'head' && delta !== null) {
+    priorLines = shiftLineRange(deltaEntryFor(delta, prior.introducedBy.path) ?? null, priorLines.startLine, priorLines.endLine);
+  }
+  const findingLines = { startLine: current.introducedBy.startLine, endLine: current.introducedBy.endLine };
+  const strictOverlap = priorLines.startLine <= findingLines.endLine && findingLines.startLine <= priorLines.endLine;
+  const gap = strictOverlap ? 0 : Math.max(priorLines.startLine, findingLines.startLine) - Math.min(priorLines.endLine, findingLines.endLine);
+  return { path, quoteMatch, near: gap <= NEAR_LINE_DISTANCE, strictOverlap, priorLines, findingLines };
+}
+
+export interface ResolvedBlockerOverlap {
+  priorFindingId: string;
+  priorTitle: string;
+  findingId: string;
+  findingTitle: string;
+  priorRuleId: string;
+  findingRuleId: string;
+  findingSeverity: Finding['severity'];
+  path: string;
+  priorLines: { startLine: number; endLine: number };
+  findingLines: { startLine: number; endLine: number };
+  match: 'quote' | 'near';
+}
+
+export interface FixedEvidenceOutsideScope {
+  priorFindingId: string;
+  priorTitle: string;
+  priorRuleId: string;
+  priorSeverity: Finding['severity'];
+  changedEvidence: { path: string; revision: Evidence['revision']; startLine: number; endLine: number }[];
+}
+
+export interface ResolutionObservations {
+  allowedFixedBlockerOverlaps: ResolvedBlockerOverlap[];
+  fixedEvidenceOutsideScope: FixedEvidenceOutsideScope[];
+}
+
+interface ResolutionArgs {
+  reconciliation: Reconciliation;
+  prior: Finding;
+  report: ReviewReport;
+  delta: Map<string, FileDelta> | null;
+  renameTargets: Map<string, string>;
+  dependencyEdges: DependencyEdge[];
+  priorFindingPaths: (prior: Finding) => Set<string>;
+  observations?: ResolutionObservations;
+}
+
+// The binding and re-raise rules for a non-open reconciliation. Returns the
+// invalid reason or null; allowed fixed-blocker near misses are appended to
+// observations instead of blocking the decision.
+function checkResolution(args: ResolutionArgs): string | null {
+  const { reconciliation, prior, report, delta, renameTargets, dependencyEdges, priorFindingPaths, observations } = args;
+  const boundPaths = priorFindingPaths(prior);
+  if (reconciliation.outcome === 'withdrawn'
+    && !reconciliation.evidence.some((item): boolean => boundPaths.has(item.path))) {
+    return `Reconciliation for "${prior.title}" withdraws it without evidence on the finding's code.`;
+  }
+  let scopeObservation: FixedEvidenceOutsideScope | null = null;
+  if (reconciliation.outcome === 'fixed') {
+    if (delta === null) return `Reconciliation for "${prior.title}" marks it fixed but no previous-head delta exists.`;
+    const introduced = renameTargets.get(prior.introducedBy.path) ?? prior.introducedBy.path;
+    const isChangedEvidence = (item: Evidence): boolean => {
+      if (item.revision === 'head') {
+        const lines = delta.get(item.path)?.changedHeadLines;
+        if (lines === undefined) return false;
+        for (let line = item.startLine; line <= item.endLine; line += 1) {
+          if (lines.has(line)) return true;
+        }
+        return false;
+      }
+      return delta.get(introduced)?.deleted === true && item.path === introduced;
+    };
+    const changedEvidence = reconciliation.evidence.filter(isChangedEvidence);
+    if (changedEvidence.length === 0) {
+      return `Reconciliation for "${prior.title}" marks it fixed without evidence on lines changed since the last reviewed head.`;
+    }
+    if (!reconciliation.evidence.some((item): boolean => boundPaths.has(item.path))) {
+      return `Reconciliation for "${prior.title}" marks it fixed without evidence on the finding's code.`;
+    }
+    const scope = new Set(boundPaths);
+    for (const edge of dependencyEdges) {
+      if (boundPaths.has(edge.from)) scope.add(edge.to);
+      if (boundPaths.has(edge.to)) scope.add(edge.from);
+    }
+    if (!changedEvidence.some((item): boolean => scope.has(item.path))) {
+      scopeObservation = {
+        priorFindingId: prior.id,
+        priorTitle: prior.title,
+        priorRuleId: prior.ruleId,
+        priorSeverity: prior.severity,
+        changedEvidence: changedEvidence.map((item): { path: string; revision: Evidence['revision']; startLine: number; endLine: number } => ({
+          path: item.path,
+          revision: item.revision,
+          startLine: item.startLine,
+          endLine: item.endLine,
+        })),
+      };
+    }
+  }
+  if (prior.severity !== 'blocker') {
+    if (scopeObservation !== null) observations?.fixedEvidenceOutsideScope.push(scopeObservation);
+    return null;
+  }
+  for (const current of report.findings) {
+    if (current.id === prior.id || current.severity === 'blocker') continue;
+    const match = matchResolvedFinding(prior, current, renameTargets, delta);
+    if (match === null) continue;
+    if (reconciliation.outcome === 'withdrawn' && (match.quoteMatch || match.near)) {
+      return `Finding "${current.title}" re-raises withdrawn blocker "${prior.title}" at lower severity.`;
+    }
+    if (reconciliation.outcome === 'fixed') {
+      if (current.ruleId === prior.ruleId && (match.quoteMatch || match.strictOverlap)) {
+        return `Finding "${current.title}" overlaps resolved blocker "${prior.title}" and cannot lower its severity.`;
+      }
+      if (match.quoteMatch || match.near) {
+        observations?.allowedFixedBlockerOverlaps.push({
+          priorFindingId: prior.id,
+          priorTitle: prior.title,
+          findingId: current.id,
+          findingTitle: current.title,
+          priorRuleId: prior.ruleId,
+          findingRuleId: current.ruleId,
+          findingSeverity: current.severity,
+          path: match.path,
+          priorLines: match.priorLines,
+          findingLines: match.findingLines,
+          match: match.quoteMatch ? 'quote' : 'near',
+        });
+      }
+    }
+  }
+  if (scopeObservation !== null) observations?.fixedEvidenceOutsideScope.push(scopeObservation);
+  return null;
 }
 
 export function evaluateReview(
@@ -205,6 +381,7 @@ export function evaluateSingleReview(
   input: unknown,
   previous: ReviewLedger,
   policy: ReviewPolicy,
+  observations?: ResolutionObservations,
 ): GateDecision {
   const invalid = (reason: string): GateDecision => ({
     status: 'incomplete',
@@ -214,12 +391,10 @@ export function evaluateSingleReview(
 
   if (!isIdentity(snapshot.identity)) return invalid('Snapshot identity is invalid.');
   if (!isSize(snapshot.size)) return invalid('Snapshot size assessment is invalid.');
-  if (snapshot.size.warnChangedLines !== policy.limits.warnChangedLines || snapshot.size.blockChangedLines !== policy.limits.blockChangedLines) {
+  if (snapshot.size.blockChangedLines !== policy.limits.blockChangedLines) {
     return invalid('Snapshot size thresholds do not match trusted policy.');
   }
   if (snapshot.size.changedLines > policy.limits.blockChangedLines) return invalid('Snapshot exceeds the agreed changed-line limit.');
-  const expectedSizeOutcome = snapshot.size.changedLines > policy.limits.warnChangedLines ? 'split_recommended' : 'within_threshold';
-  if (snapshot.size.outcome !== expectedSizeOutcome) return invalid('Snapshot size outcome does not match the changed-line count.');
   if (!policy.repositories.includes(snapshot.identity.repository)) return invalid('Repository is outside the POC allowlist.');
   if (snapshot.identity.model !== policy.model) return invalid('Snapshot model differs from trusted policy.');
   if (previous.repository !== snapshot.identity.repository || previous.pullRequest !== snapshot.identity.pullRequest) {
@@ -249,8 +424,8 @@ export function evaluateSingleReview(
   report.limitations.forEach((limitation: string): void => add(`Review limitation: ${limitation}`));
 
   const changedPaths = new Set(snapshot.changes.map((change): string => change.path));
-  const attributedPaths = new Set(snapshot.changes.flatMap((change): string[] => [change.path, ...(change.previousPath ? [change.previousPath] : [])]));
-  const sourcePaths = new Set(snapshot.files.map((file): string => file.path));
+  const attributedPaths = changedAndPreviousPaths(snapshot.changes);
+  const sourcePaths = new Set([...snapshot.files.map((file): string => file.path), ...(snapshot.availablePaths ?? [])]);
   if (duplicateValues([...snapshot.changes.map((change): string => change.path)]).length > 0) add('Snapshot has duplicate changed paths.');
   if (duplicateValues(snapshot.files.map((file): string => `${file.revision}:${file.path}`)).length > 0) add('Snapshot has duplicate source entries.');
   for (const change of snapshot.changes) {
@@ -309,16 +484,36 @@ export function evaluateSingleReview(
     }
   }
 
-  const previousIds = new Set(previous.openFindings.map((finding): string => finding.id));
-  const priorTitle = (id: string): string => previous.openFindings.find((finding): boolean => finding.id === id)?.title ?? id;
+  const priorById = new Map(previous.openFindings.map((finding): [string, Finding] => [finding.id, finding]));
+  const priorTitle = (id: string): string => priorById.get(id)?.title ?? id;
+  const renameTargets = new Map<string, string>();
+  for (const change of snapshot.changes) {
+    if (change.previousPath !== undefined) renameTargets.set(change.previousPath, change.path);
+  }
+  const delta = snapshot.deltaDiff === null ? null : parseDiffLines(snapshot.deltaDiff);
+  // The path set a resolution must cite to be bound to the finding's code: its
+  // introduction site plus every path it cited, extended across renames. Later
+  // batches may also admit code an author's /sentinel recheck reply points to.
+  const priorFindingPaths = (prior: Finding): Set<string> => {
+    const paths = new Set([prior.introducedBy.path, ...prior.evidence.map((item): string => item.path)]);
+    for (const known of [...paths]) {
+      const renamed = renameTargets.get(known);
+      if (renamed !== undefined) paths.add(renamed);
+    }
+    return paths;
+  };
   for (const reconciliation of report.reconciliations) {
-    if (!previousIds.has(reconciliation.findingId)) return invalid(`Reconciliation references an unknown prior finding: ${reconciliation.findingId}.`);
+    const prior = priorById.get(reconciliation.findingId);
+    if (prior === undefined) return invalid(`Reconciliation references an unknown prior finding: ${reconciliation.findingId}.`);
     if (!reconciliation.evidence.every((evidence): boolean => evidenceExists(snapshot, evidence))) {
       return invalid(`Reconciliation for "${priorTitle(reconciliation.findingId)}" has unavailable code evidence.`);
     }
     if (reconciliation.outcome !== 'open' && findingIds.includes(reconciliation.findingId)) {
       return invalid(`Finding "${priorTitle(reconciliation.findingId)}" is both open and resolved.`);
     }
+    if (reconciliation.outcome === 'open') continue;
+    const resolutionError = checkResolution({ reconciliation, prior, report, delta, renameTargets, dependencyEdges: snapshot.dependencyEdges, priorFindingPaths, observations });
+    if (resolutionError !== null) return invalid(resolutionError);
   }
   for (const prior of previous.openFindings) {
     const reconciliation = report.reconciliations.find((item): boolean => item.findingId === prior.id);

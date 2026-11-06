@@ -67,7 +67,7 @@ npm run typecheck
 
 | Command | What it does |
 |---|---|
-| `prepare` | Builds a review packet for one PR. PRs over 1,500 changed lines are refused; over 800 is flagged `split_recommended`. |
+| `prepare` | Builds a review packet for one PR. PRs over 1,500 changed lines are refused before any review runs. |
 | `prepare-bundle` | Same, then splits big context into bounded part requests a model can actually read. |
 | `review` | Sends the packet to a provider (`mock` replays fixtures offline; `bedrock` is the real path) and evaluates the reply. |
 | `record` | Validates a report and permanently stores the decision. |

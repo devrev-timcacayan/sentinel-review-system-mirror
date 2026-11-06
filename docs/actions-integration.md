@@ -74,17 +74,30 @@ preparation job and run-scoped Actions artifact transport, not a signature.
   API/run/state, prepares the action request, writes `request.json`,
   `report.schema.json`, `instructions.md`, `host-context.json`,
   `checkpoint.json`. On incomplete preparation exits 3 with artifacts but never
-  pushes or invokes the model. On success commits the pending reservation
+  pushes or invokes the model. If the cumulative diff exceeds the trusted
+  `blockChangedLines` limit, preparation throws before any artifacts: reserve
+  writes only `size-refusal.json`, emits `size_refused=true` and
+  `timeout_minutes=1` outputs, and returns 0 without state writes or statuses.
+  On success commits the pending reservation
   (`review: reserve PR N for RUNID`) and pushes fast-forward only.
 - `check --source-checkout --state-checkout --prepared`: re-verifies identity,
   run, pin, pending reservation token/ledger, prepared artifacts, and unchanged
   controls before the credentialed step. No writes.
 - `materialize --source-checkout --prepared --out`: exports the immutable
   base/head source view to `review-source/{base,head}/<path>` under the per-file
-  read limit; non-required unreadable paths go to `omissions.json`, unavailable
-  required paths exit 3. Emits `prompt`, `claude_args`, `settings` to
-  `GITHUB_OUTPUT`. The disk view is not a prompt packet and its total size is
-  not bounded by the later validation cache's cumulative-byte limit.
+  read limit; non-required unreadable paths go to `omissions.json` and are
+  listed in a trusted `# Omitted source` prompt section (capped at 50 entries),
+  unavailable required paths exit 3, and an unreadable dependency neighbor of a
+  changed path also fails closed as unavailable. Emits `prompt`, `claude_args`,
+  `settings` to `GITHUB_OUTPUT`. The disk view is not a prompt packet and its
+  total size is not bounded by the later validation cache's cumulative-byte
+  limit.
+- `refuse-size --prepared [--system-root]`: authorizes like the status stages,
+  then strictly validates `size-refusal.json` against the live PR identity,
+  run, and trusted `blockChangedLines`. Publishes the sticky summary with a
+  `## Sentinel review: size_refused` body stating the changed-line count, the
+  limit, and that the PR must be split (no review ran); posts a `failure`
+  commit status; emits `canonical_decision=size_refused`; exits 2.
 - `capture --out`: records `ACTION_OUTCOME`, `ACTION_CONCLUSION`,
   `ACTION_SESSION_ID`, `ACTION_STRUCTURED_OUTPUT` and copies the execution
   trace if it is a readable regular file under `RUNNER_TEMP`. Fresh 0700 dir,
@@ -134,7 +147,10 @@ repository/PR). Inconsistency fails closed; a PR absent from both is a valid
 new registration; a record without index listing or vice versa is corruption.
 Commits use a fixed sentinel identity with hooks disabled; pushes are normal
 fast-forward with the token passed via a child-env credential header, never in
-output or config.
+output or config. A non-fast-forward rejection is retried up to three total
+attempts under the C locale: refetch the state tip, fail closed if it changed
+this PR's own record (a same-PR race is never merged), otherwise reset to it,
+merge the index, recommit, and push again. Never a force-push.
 
 Legacy packet modules (snapshot/gate/state/partition runners) are retained
 because the offline CLI, docs, and tests still reference them.
@@ -180,9 +196,28 @@ that case. Historical cloud runs (probe `41797946024`, checkout
 
 Contract notes worth knowing: the coverage cross-check that requires every
 dependency neighbor in `relatedPaths` applies only to `reliability-impact`
-entries; `sourceReads` is the validator's audit of what it actually loaded or found
-absent, not an input allowlist or proof that the model inspected those files;
-the reliability-impact coverage entry is the only one with a neighbor check,
+entries; `sourceReads` is the validator's audit of what it actually loaded, found
+absent, or verified present, not an input allowlist or proof that the model
+inspected those files; coverage `relatedPaths` are verified by tree existence
+only and are never loaded; `maxFiles` counts only evidence-only loads, so
+changed-file entries are always allowed; `maxSourceBytes` still bounds every
+load; the reliability-impact coverage entry is the only one with a neighbor check,
 and that check is name/source presence, not proof of inspection; and evidence quote matching strips leading whitespace per
 line (a whitespace-only line compares as empty) while all other content,
-including internal and trailing whitespace, must match exactly.
+including internal and trailing whitespace, must match exactly. Reconciling a
+prior finding `fixed` requires evidence on lines changed since the last
+reviewed head (a previous-head delta must exist, and adjacent head lines
+anchor deletion-only fixes) plus at least one citation on the finding's own
+paths; `withdrawn` requires evidence on the finding's paths. A withdrawn
+blocker cannot reappear at the same or a nearby site under any rule, a fixed
+blocker cannot reappear under the same rule at a matching or overlapping site,
+and allowed different-rule near misses are logged to the validation audit as
+`resolutionOverlaps`. Accepted `fixed` resolutions whose changed-line
+evidence lies outside the finding's files and their direct dependency
+neighbors are likewise logged as `fixedEvidenceOutsideScope` for
+shadow-period measurement. Known limits: the changed-line citation may come from
+any file, not only the finding's files or their import neighbors; the delta
+runs from the previous head to the current head, so upstream edits brought in
+by a merge or rebase also count as changed lines; and only head-side prior
+citations are shifted through the delta, so a base-side prior site is compared
+by quote and unshifted lines.

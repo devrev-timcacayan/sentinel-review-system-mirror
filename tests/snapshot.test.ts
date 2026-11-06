@@ -102,7 +102,7 @@ test('deleted and renamed sources keep their before content and paths', (): void
 });
 
 
-test('document size thresholds warn above 800 and stop above 1500 cumulative changed lines', (): void => {
+test('document size threshold stops above 1500 cumulative changed lines', (): void => {
   const repoWithLines = (count: number): RepoFixture => {
     const repo = makeRepo();
     repo.write('src/large.ts', '');
@@ -113,10 +113,10 @@ test('document size thresholds warn above 800 and stop above 1500 cumulative cha
     repo.git(['branch', '-f', 'head', 'HEAD']);
     return repo;
   };
-  for (const [count, outcome] of [[800, 'within_threshold'], [801, 'split_recommended'], [1500, 'split_recommended']] as const) {
+  for (const count of [800, 801, 1500]) {
     const snapshot = collectSnapshot(baseOptions(repoWithLines(count)), loadTestPolicy({ contextPaths: [] }));
     assert.equal(snapshot.size.changedLines, count);
-    assert.equal(snapshot.size.outcome, outcome);
+    assert.equal(snapshot.size.blockChangedLines, 1500);
   }
   const oversized = repoWithLines(1501);
   assert.throws(() => collectSnapshot(baseOptions(oversized), loadTestPolicy({ contextPaths: [] })), /exceeding the agreed 1500-line limit|No review packet/);
@@ -173,7 +173,7 @@ test('pure renames do not count as changed lines', (): void => {
   repo.git(['branch', '-f', 'head', 'HEAD']);
   const snapshot = collectSnapshot(baseOptions(repo), loadTestPolicy({ contextPaths: [] }));
   assert.equal(snapshot.size.changedLines, 0);
-  assert.equal(snapshot.size.outcome, 'within_threshold');
+  assert.equal(snapshot.size.blockChangedLines, 1500);
 });
 
 test('additions and deletions both count toward the cumulative size threshold', (): void => {
@@ -200,10 +200,9 @@ test('tampered or oversized snapshot size assessments are rejected', (): void =>
   const snapshot = collectSnapshot(baseOptions(repo), loaded);
   const oversized = JSON.parse(JSON.stringify(snapshot));
   oversized.size.changedLines = 1501;
-  oversized.size.outcome = 'split_recommended';
-  assert.throws(() => validateSnapshot(oversized, loaded), /size assessment outcome|blocking threshold/);
+  assert.throws(() => validateSnapshot(oversized, loaded), /blocking threshold/);
   const mismatched = JSON.parse(JSON.stringify(snapshot));
-  mismatched.size.warnChangedLines = 900;
+  mismatched.size.blockChangedLines = 900;
   assert.throws(() => validateSnapshot(mismatched, loaded), /size assessment invalid/);
 });
 test('uncommitted working-tree edits never enter the packet', (): void => {
@@ -248,7 +247,7 @@ test('context budget exhaustion is an explicit incomplete limitation, never sile
   repo.write('src/a.ts', 'export const a = 2;\n');
   repo.commit('head');
   repo.git(['branch', '-f', 'head', 'HEAD']);
-  const loaded = loadTestPolicy({ contextPaths: [], limits: { maxFiles: 2, maxSourceBytes: 4_000_000, maxPartSourceBytes: 4_000_000, maxDiffBytes: 1_000_000, warnChangedLines: 800, blockChangedLines: 1500 } });
+  const loaded = loadTestPolicy({ contextPaths: [], limits: { maxFiles: 2, maxSourceBytes: 4_000_000, maxPartSourceBytes: 4_000_000, maxDiffBytes: 1_000_000, blockChangedLines: 1500 } });
   const snapshot = collectSnapshot(baseOptions(repo), loaded);
   assert.equal(snapshot.complete, false);
   assert.ok(snapshot.limitations.some((line) => line.includes('Context budget exhausted')));

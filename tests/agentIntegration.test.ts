@@ -414,7 +414,7 @@ test('a prior blocker is never dropped: omitted reconciliation is incomplete, op
   // Evidence-based fixed reconciliation -> synthetic pass clears the blocker.
   {
     const a = makeAgentRepo();
-    a.checkpointPath = writeJson(path.join(a.tmp, 'prior-state.json'), checkpoint(priorLedger));
+    a.checkpointPath = writeJson(path.join(a.tmp, 'prior-state.json'), checkpoint({ ...priorLedger, lastHeadSha: a.baseSha }));
     const run = runPrepare(a);
     const report = writeReport(run.a, agentReport(run.request, {
       reconciliations: [{ findingId: 'F-1', outcome: 'fixed', rationale: 'Synthetic resolution attestation citing current source; semantic correctness is not established by this fixture.', evidence: [HEAD_EVIDENCE] }],
@@ -424,12 +424,15 @@ test('a prior blocker is never dropped: omitted reconciliation is incomplete, op
     const envelope = JSON.parse(readFileSync(path.join(run.a.tmp, 'validated', 'decision.json'), 'utf8'));
     assert.equal(envelope.decision.status, 'pass');
     assert.equal(envelope.decision.ledger.openFindings.length, 0);
+    const audit = JSON.parse(readFileSync(path.join(run.a.tmp, 'validated', 'validation-audit.json'), 'utf8'));
+    assert.deepEqual(audit.resolutionOverlaps, []);
+    assert.deepEqual(audit.fixedEvidenceOutsideScope, []);
   }
 
   // An incomplete report cannot clear the blocker even while claiming fixed.
   {
     const a = makeAgentRepo();
-    a.checkpointPath = writeJson(path.join(a.tmp, 'prior-state.json'), checkpoint(priorLedger));
+    a.checkpointPath = writeJson(path.join(a.tmp, 'prior-state.json'), checkpoint({ ...priorLedger, lastHeadSha: a.baseSha }));
     const run = runPrepare(a);
     const report = writeReport(run.a, agentReport(run.request, {
       complete: false,
@@ -884,16 +887,29 @@ test('validation-limits must be exact positive integers and offline source budge
     assert.equal(result.status, 3, result.stderr);
   }
 
-  // Two required sources (head+base of the changed file) cannot fit inside maxFiles 1
-  // or a 10-byte cumulative cap; preparation still completes and validation refuses.
-  for (const [name, limits] of Object.entries({
-    'max-files': { maxFiles: 1, maxSourceBytes: 1_000_000, maxReadBytes: 100_000 },
-    'max-bytes': { maxFiles: 100, maxSourceBytes: 10, maxReadBytes: 100_000 },
-  })) {
+  // Only evidence-only loads count against maxFiles: two extra cited files
+  // cannot fit inside maxFiles 1, and a 10-byte cumulative cap refuses even
+  // required changed-file loads. Preparation still completes; validation refuses.
+  for (const [name, limits, extraEvidence] of [
+    ['max-files', { maxFiles: 1, maxSourceBytes: 1_000_000, maxReadBytes: 100_000 }, [
+      { path: 'CLAUDE.md', revision: 'base', startLine: 1, endLine: 1, quote: '# stub CLAUDE.md' },
+      { path: 'package.json', revision: 'base', startLine: 1, endLine: 1, quote: '{"name":"fixture","private":true}' },
+    ]],
+    ['max-bytes', { maxFiles: 100, maxSourceBytes: 10, maxReadBytes: 100_000 }, []],
+  ] as const) {
     const a = makeAgentRepo();
     a.limitsPath = writeJson(path.join(a.tmp, 'limits.json'), limits);
     const run = runPrepare(a);
-    const report = writeReport(run.a, agentReport(run.request));
+    const overrides: Record<string, unknown> = extraEvidence.length === 0 ? {} : {
+      findings: [{
+        id: 'F-extra', ruleId: 'SR-002', severity: 'advisory',
+        title: 'Synthetic advisory citing extra files.', explanation: 'Cites unchanged context.', impact: 'None.',
+        introducedBy: { path: 'src/action.ts', revision: 'head', startLine: 1, endLine: 1, quote: 'export const required = false;' },
+        evidence: extraEvidence,
+        counterEvidence: [],
+      }],
+    };
+    const report = writeReport(run.a, agentReport(run.request, overrides));
     const result = cli(validateArgs(run, { report }));
     assert.equal(result.status, 3, `${name}: stdout=${result.stdout} stderr=${result.stderr}`);
     const out = path.join(run.a.tmp, 'validated');
@@ -1065,4 +1081,47 @@ test('missing canonical context is incomplete at preparation and validation, ret
   assert.equal(envelope.decision.status, 'incomplete');
   assert.equal(envelope.decision.ledger.lastHeadSha, null, 'prior ledger must be retained');
   assert.match(envelope.decision.reasons.join(' '), /CLAUDE\.md/);
+});
+
+test('changed files do not count against maxFiles and coverage related paths only need to exist', (): void => {
+  const repo = makeRepo();
+  const loaded = loadTestPolicy();
+  seedPolicyContext(repo, loaded);
+  repo.write('src/shared.ts', 'export const shared = 1;\n');
+  for (let i = 0; i < 101; i += 1) repo.write(`src/file${i}.ts`, 'export const v = 1;\n');
+  const baseSha = repo.commit('base');
+  for (let i = 0; i < 101; i += 1) repo.write(`src/file${i}.ts`, `export const v${i} = ${i};\n`);
+  const headSha = repo.commit('head');
+  const tmp = mkdtempSync(path.join(tmpdir(), 'srs-agent-many-'));
+  const a: AgentRepo = {
+    repo,
+    baseSha,
+    headSha,
+    tmp,
+    checkpointPath: writeJson(path.join(tmp, 'prior-state.json'), checkpoint()),
+    limitsPath: writeJson(path.join(tmp, 'limits.json'), { maxFiles: 200, maxSourceBytes: 1_000_000, maxReadBytes: 100_000 }),
+  };
+  const run = runPrepare(a);
+  assert.equal(run.request.changes.length, 101);
+  // A relatedPath that exists in the trees but is never loaded still satisfies
+  // the coverage check and is recorded as present rather than read.
+  const report = agentReport(run.request);
+  (report.coverage as { relatedPaths: string[] }[])[0].relatedPaths = ['src/shared.ts'];
+  const reportPath = writeReport(a, report);
+  const out = path.join(a.tmp, 'validated');
+  const result = cli(validateArgs(run, { report: reportPath }, { out }));
+  assert.equal(result.status, 0, result.stderr);
+  const audit = JSON.parse(readFileSync(path.join(out, 'validation-audit.json'), 'utf8'));
+  assert.equal(audit.budget.cappedSources, 0);
+  assert.equal(audit.budget.sources, 202);
+  assert.ok(audit.sourceReads.some((read: { path: string; status: string }) => read.path === 'src/shared.ts' && read.status === 'present'));
+
+  const absentOut = path.join(mkdtempSync(path.join(tmpdir(), 'srs-absent-')), 'validated');
+  const badReport = agentReport(run.request);
+  (badReport.coverage as { relatedPaths: string[] }[])[0].relatedPaths = ['src/missing.ts'];
+  const badPath = writeReport(a, badReport, 'report-missing.json');
+  const bad = cli(validateArgs(run, { report: badPath }, { out: absentOut }));
+  assert.equal(bad.status, 3, bad.stderr);
+  const badAudit = JSON.parse(readFileSync(path.join(absentOut, 'validation-audit.json'), 'utf8'));
+  assert.match(JSON.stringify(badAudit), /src\/missing\.ts is absent at head and merge base|unavailable source/);
 });

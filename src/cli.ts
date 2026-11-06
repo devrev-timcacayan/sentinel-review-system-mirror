@@ -24,7 +24,7 @@ Usage:
   cli journal-migrate --repository OWNER/REPO --pr N [--state-root PATH] [--system-root PATH]
   cli prepare-agent --offline true --checkout PATH --repository OWNER/REPO --pr N --base REF --head REF --run-id ID --review-system-sha SHA --prior-state FILE --validation-limits FILE --out DIR [--system-root PATH]
   cli validate-agent --offline true --checkout PATH --request FILE --report FILE --execution FILE --current FILE --prior-state FILE --out DIR [--system-root PATH]
-  cli action-host <start-status|fail-status|reserve|check|materialize|capture|finalize> [stage flags]
+  cli action-host <start-status|fail-status|reserve|check|materialize|capture|refuse-size|finalize> [stage flags]
   cli --help
 
 prepare-bundle captures the full source set without the maxFiles entry cap (total byte cap unchanged),

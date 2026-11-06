@@ -228,11 +228,9 @@ function isDependencyEdge(value: unknown): value is DependencyEdge {
 
 function isSizeAssessment(value: unknown): value is SizeAssessment {
   return isObject(value)
-    && hasKeys(value, ['changedLines', 'warnChangedLines', 'blockChangedLines', 'outcome'])
+    && hasKeys(value, ['changedLines', 'blockChangedLines'])
     && Number.isSafeInteger(value.changedLines) && Number(value.changedLines) >= 0
-    && Number.isSafeInteger(value.warnChangedLines) && Number(value.warnChangedLines) > 0
-    && Number.isSafeInteger(value.blockChangedLines) && Number(value.blockChangedLines) > 0
-    && ['within_threshold', 'split_recommended'].includes(String(value.outcome));
+    && Number.isSafeInteger(value.blockChangedLines) && Number(value.blockChangedLines) > 0;
 }
 
 function isIdentityShape(value: unknown): value is ReviewIdentity {

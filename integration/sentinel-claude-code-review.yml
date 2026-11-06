@@ -37,6 +37,7 @@ jobs:
     outputs:
       timeout_minutes: ${{ steps.prepare.outputs.timeout_minutes }}
       review_system_sha: ${{ steps.reviewer.outputs.sha }}
+      size_refused: ${{ steps.prepare.outputs.size_refused }}
     steps:
       - name: Require private checkout access
         env:
@@ -108,7 +109,7 @@ jobs:
           if-no-files-found: error
 
   investigate:
-    if: ${{ github.event_name == 'workflow_dispatch' && needs.prepare.result == 'success' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && needs.prepare.result == 'success' && needs.prepare.outputs.size_refused != 'true' }}
     needs: prepare
     runs-on: ubuntu-latest
     # The fallback is only for a skipped job after failed preparation, never a run limit.
@@ -275,8 +276,18 @@ jobs:
           name: canonical-execution-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/action-result
 
+      - name: Publish the size refusal for an oversized pull request
+        id: size_refusal
+        if: ${{ needs.prepare.outputs.size_refused == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --experimental-strip-types review-system/src/cli.ts action-host refuse-size \
+            --prepared "$RUNNER_TEMP/prepared"
+
       - name: Validate, persist, publish, and enforce the canonical decision
         id: finalize
+        if: ${{ needs.prepare.outputs.size_refused != 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -288,7 +299,7 @@ jobs:
             --out "$RUNNER_TEMP/validated"
 
       - name: Mark the exact PR head review failed when validation did not complete
-        if: ${{ always() && steps.finalize.outputs.canonical_decision == '' }}
+        if: ${{ always() && steps.finalize.outputs.canonical_decision == '' && steps.size_refusal.outputs.canonical_decision == '' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

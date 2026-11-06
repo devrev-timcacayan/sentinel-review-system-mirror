@@ -17,7 +17,7 @@ function makePolicy(maxFiles = 4, maxSourceBytes = 4_000_000, maxPartSourceBytes
     repositories: [ALLOWED_REPOSITORY],
     model: 'test-model',
     dimensions: ['test-validity', 'reliability-impact', 'maintainability'],
-    limits: { maxFiles, maxSourceBytes, maxPartSourceBytes, maxDiffBytes: 1_000_000, warnChangedLines: 800, blockChangedLines: 1500 },
+    limits: { maxFiles, maxSourceBytes, maxPartSourceBytes, maxDiffBytes: 1_000_000, blockChangedLines: 1500 },
     contextPaths: [],
     rules: [],
   };
@@ -48,7 +48,7 @@ function makeSnapshot(overrides: Partial<ReviewSnapshot> = {}): ReviewSnapshot {
     },
     previousHeadSha: null,
     changes: [{ path: 'src/a.ts', status: 'modified' }],
-    size: { changedLines: 1, warnChangedLines: 800, blockChangedLines: 1500, outcome: 'within_threshold' },
+    size: { changedLines: 1, blockChangedLines: 1500 },
     files,
     dependencyEdges: [
       { from: 'src/b.ts', to: 'src/a.ts' },

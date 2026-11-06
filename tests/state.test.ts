@@ -550,6 +550,15 @@ test('legacy migration refuses resolved finding history without altering the jou
   fixedSource.content = 'export const required = true;\n';
   second.changes = [];
   second.cumulativeDiff = '';
+  second.deltaDiff = [
+    'diff --git a/src/action.ts b/src/action.ts',
+    '--- a/src/action.ts',
+    '+++ b/src/action.ts',
+    '@@ -1,1 +1,1 @@',
+    '-export const required = false;',
+    '+export const required = true;',
+    '',
+  ].join('\n');
   second.size.changedLines = 0;
   const evidence = { path: 'src/action.ts', revision: 'head' as const, startLine: 1, endLine: 1, quote: 'export const required = true;' };
   const resolution = makeReport(second, { reconciliations: [

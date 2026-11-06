@@ -4,6 +4,7 @@ import ts from 'typescript';
 import type { LoadedPolicy } from './policy.ts';
 import { planReviewContext } from './contextPlanner.ts';
 import { validatePartitionManifest } from './partitionContract.ts';
+import { changedAndPreviousPaths } from './diffLines.ts';
 import type { Change, DependencyEdge, ReviewSnapshot, SizeAssessment, SourceFile } from './contracts.ts';
 
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
@@ -411,9 +412,7 @@ export function collectSnapshot(options: CollectSnapshotOptions, loaded: LoadedP
   }
   const size: SizeAssessment = {
     changedLines,
-    warnChangedLines: policy.limits.warnChangedLines,
     blockChangedLines: policy.limits.blockChangedLines,
-    outcome: changedLines > policy.limits.warnChangedLines ? 'split_recommended' : 'within_threshold',
   };
 
   const cumulativeDiff = git(options.checkout, ['diff', '--no-ext-diff', '--no-textconv', mergeBaseSha, headSha]).toString('utf8');
@@ -654,16 +653,16 @@ export function collectAgentMetadata(options: CollectAgentMetadataOptions, loade
 
   const changedLines = countChangedLines(options.checkout, mergeBaseSha, headSha);
   if (changedLines > policy.limits.blockChangedLines) {
-    throw new Error(
+    throw new SizeRefusedError(
+      changedLines,
+      policy.limits.blockChangedLines,
       `Preparation refused: cumulative PR has ${changedLines} changed lines, exceeding the agreed ${policy.limits.blockChangedLines}-line limit. `
       + 'Break the change into focused, independently reviewable PRs and retry. No review request was produced.',
     );
   }
   const size: SizeAssessment = {
     changedLines,
-    warnChangedLines: policy.limits.warnChangedLines,
     blockChangedLines: policy.limits.blockChangedLines,
-    outcome: changedLines > policy.limits.warnChangedLines ? 'split_recommended' : 'within_threshold',
   };
 
   const cumulativeDiff = git(options.checkout, ['diff', '--no-ext-diff', '--no-textconv', mergeBaseSha, headSha]).toString('utf8');
@@ -728,7 +727,7 @@ export function collectAgentMetadata(options: CollectAgentMetadataOptions, loade
     }
   }
 
-  const relevantPaths = new Set(changes.flatMap((change): string[] => [change.path, ...(change.previousPath ? [change.previousPath] : [])]));
+  const relevantPaths = changedAndPreviousPaths(changes);
   const incident = new Map<string, DependencyEdge>();
   for (const edge of [...headGraph.edges, ...baseGraph.edges]) {
     if (!relevantPaths.has(edge.from) && !relevantPaths.has(edge.to)) continue;
@@ -757,6 +756,18 @@ export function collectAgentMetadata(options: CollectAgentMetadataOptions, loade
     complete: limitations.length === 0,
     limitations,
   };
+}
+
+export class SizeRefusedError extends Error {
+  readonly changedLines: number;
+  readonly blockChangedLines: number;
+
+  constructor(changedLines: number, blockChangedLines: number, message: string) {
+    super(message);
+    this.name = 'SizeRefusedError';
+    this.changedLines = changedLines;
+    this.blockChangedLines = blockChangedLines;
+  }
 }
 
 export interface AgentTreeEntry {
@@ -867,15 +878,11 @@ export function validateSnapshot(input: unknown, loaded: LoadedPolicy): ReviewSn
   }
   const size = input.size;
   check(
-    isObject(size) && hasKeys(size, ['changedLines', 'warnChangedLines', 'blockChangedLines', 'outcome'])
+    isObject(size) && hasKeys(size, ['changedLines', 'blockChangedLines'])
       && Number.isSafeInteger(size.changedLines) && Number(size.changedLines) >= 0
-      && size.warnChangedLines === loaded.policy.limits.warnChangedLines
-      && size.blockChangedLines === loaded.policy.limits.blockChangedLines
-      && ['within_threshold', 'split_recommended'].includes(String(size.outcome)),
+      && size.blockChangedLines === loaded.policy.limits.blockChangedLines,
     'size assessment invalid',
   );
-  const expectedOutcome = Number(size.changedLines) > loaded.policy.limits.warnChangedLines ? 'split_recommended' : 'within_threshold';
-  check(size.outcome === expectedOutcome, 'size assessment outcome does not match changed-line count');
   check(Number(size.changedLines) <= loaded.policy.limits.blockChangedLines, 'changed-line count exceeds the agreed blocking threshold');
   check(Array.isArray(input.files), 'files must be an array');
   const fileKeys = new Set<string>();

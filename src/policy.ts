@@ -82,16 +82,12 @@ function validatePolicy(value: unknown, origin: string): ReviewPolicy {
     'dimensions must be a non-empty subset of the contract dimensions',
   );
   check(isObject(value.limits), 'limits must be an object');
-  for (const key of ['maxFiles', 'maxSourceBytes', 'maxPartSourceBytes', 'maxDiffBytes', 'warnChangedLines', 'blockChangedLines']) {
+  for (const key of ['maxFiles', 'maxSourceBytes', 'maxPartSourceBytes', 'maxDiffBytes', 'blockChangedLines']) {
     check(Number.isSafeInteger(value.limits[key]) && Number(value.limits[key]) > 0, `limits.${key} must be a positive integer`);
   }
   check(
     Number(value.limits.maxPartSourceBytes) <= Number(value.limits.maxSourceBytes),
     'limits.maxPartSourceBytes must not exceed limits.maxSourceBytes',
-  );
-  check(
-    Number(value.limits.warnChangedLines) < Number(value.limits.blockChangedLines),
-    'limits.warnChangedLines must be lower than limits.blockChangedLines',
   );
   check(Array.isArray(value.contextPaths) && value.contextPaths.every(isRelativeSafePath), 'contextPaths must be relative safe paths');
   check(Array.isArray(value.rules) && value.rules.length > 0, 'rules must be a non-empty array');

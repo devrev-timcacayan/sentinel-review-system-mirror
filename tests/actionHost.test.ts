@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { readActionControls, actionClaudeArgs } from '../src/actionControls.ts';
-import { renderSummary, runActionHost } from '../src/actionHost.ts';
+import { renderSizeRefusal, renderSummary, runActionHost } from '../src/actionHost.ts';
 import { validateActionRequest } from '../src/agentContracts.ts';
 import { isReport } from '../src/gate.ts';
 import type { HostDeps, HttpRequest, HttpResponse } from '../src/actionHost.ts';
@@ -32,10 +32,11 @@ interface Rig {
   eventPath: string;
 }
 
-function makeRig(files: { base?: string; head?: string } = {}): Rig {
+function makeRig(files: { base?: string; head?: string; extraBase?: { path: string; content: string }[] } = {}): Rig {
   const repo = makeRepo();
   seedPolicyContext(repo, loadTestPolicy());
   repo.write('src/action.ts', files.base ?? 'export const required = true;\n');
+  for (const extra of files.extraBase ?? []) repo.write(extra.path, extra.content);
   const baseSha = repo.commit('base');
   repo.write('src/action.ts', files.head ?? 'export const required = false;\n');
   const headSha = repo.commit('head');
@@ -228,8 +229,8 @@ test('cli action-host capture writes step data and unknown stages fail nonzero',
   assert.notEqual(bad.status, 0);
 
   const template = readFileSync(path.join(SYSTEM_ROOT, 'integration', 'sentinel-claude-code-review.yml'), 'utf8');
-  const calls = template.match(/cli\.ts action-host (reserve|check|materialize|capture|finalize)/g) ?? [];
-  assert.deepEqual(calls.sort(), ['cli.ts action-host capture', 'cli.ts action-host check', 'cli.ts action-host finalize', 'cli.ts action-host materialize', 'cli.ts action-host reserve']);
+  const calls = template.match(/cli\.ts action-host (reserve|check|materialize|capture|refuse-size|finalize)/g) ?? [];
+  assert.deepEqual(calls.sort(), ['cli.ts action-host capture', 'cli.ts action-host check', 'cli.ts action-host finalize', 'cli.ts action-host materialize', 'cli.ts action-host refuse-size', 'cli.ts action-host reserve']);
   assert.doesNotMatch(template, /actionHost\.ts/);
   const prepare = template.split('\n  prepare:\n')[1].split('\n  investigate:\n')[0];
   const investigate = template.split('\n  investigate:\n')[1].split('\n  claude-auto-review:\n')[0];
@@ -317,10 +318,14 @@ test('push races prevent publication and publication failure never becomes a suc
     const rig = makeRig();
     assert.equal(await runActionHost('reserve', { ...hostOptions(rig), out: rig.preparedDir }, rig.deps), 0);
     writeResult(rig, reportFor(rig));
+    let pushAttempts = 0;
     if (scenario === 'push-race') {
       const originalGit = rig.deps.git;
       rig.deps.git = (dir: string, args: string[], options): string => {
-        if (args[0] === 'push') throw new Error('Synthetic non-fast-forward push rejection');
+        if (args[0] === 'push') {
+          pushAttempts += 1;
+          throw new Error('Synthetic non-fast-forward push rejection');
+        }
         return originalGit(dir, args, options);
       };
     } else {
@@ -331,6 +336,8 @@ test('push races prevent publication and publication failure never becomes a suc
     await assert.rejects(() => runActionHost('finalize', hostOptions(rig), rig.deps),
       scenario === 'push-race' ? /non-fast-forward push rejection/ : /comment publication failed with status 403/);
     assert.equal(rig.posts.length, 0, scenario);
+    // A rejected push retries on the fetched state tip; all three attempts fail here.
+    if (scenario === 'push-race') assert.equal(pushAttempts, 3, scenario);
     assert.equal(rig.pushes.length, scenario === 'push-race' ? 1 : 2, scenario);
     if (scenario === 'post-failure') {
       const record = JSON.parse(readFileSync(path.join(rig.stateDir, 'prs', '17.json'), 'utf8'));
@@ -1011,4 +1018,98 @@ test('a legacy four-input dispatch still validates SHAs against the live PR', as
   writeFileSync(eventPath, JSON.stringify({ inputs: { mode: 'review', pr_number: '17', base_sha: baseSha, head_sha: headSha } }));
   assert.equal(await runActionHost('reserve', { ...dispatchOptions(ok), out: ok.preparedDir }, ok.deps), 0);
   assert.equal(ok.pushes.length, 1);
+});
+
+test('oversized PRs are refused at reserve and published by refuse-size without state or model work', async (): Promise<void> => {
+  const lines = Array.from({ length: 1500 }, (_v, i) => `export const line${i} = ${i};`).join('\n') + '\n';
+  const rig = makeDispatchRig({}, { head: lines });
+  assert.equal(await runActionHost('reserve', { ...dispatchOptions(rig), out: rig.preparedDir }, rig.deps), 0);
+  assert.equal(rig.pushes.length, 0, 'a refused PR must not write review state');
+  const refusal = JSON.parse(readFileSync(path.join(rig.preparedDir, 'size-refusal.json'), 'utf8'));
+  assert.equal(refusal.kind, 'size-refusal');
+  assert.equal(refusal.changedLines, 1501);
+  assert.equal(refusal.blockChangedLines, 1500);
+  const output = readFileSync(rig.env.GITHUB_OUTPUT as string, 'utf8');
+  assert.match(output, /size_refused<<[^>]*\ntrue/);
+  assert.match(output, /timeout_minutes<<[^>]*\n1/);
+  assert.equal(rig.posts.length, 0, 'reserve posts no status on refusal');
+  assert.equal(await runActionHost('refuse-size', { prepared: rig.preparedDir, systemRoot: SYSTEM_ROOT }, rig.deps), 2);
+  assert.deepEqual(rig.statuses.map((s) => s.state), ['failure']);
+  assert.equal(rig.statuses[0].sha, rig.source.headSha);
+  assert.match(String(rig.statuses[0].body.description), /1,501 changed lines \(limit 1,500\)/);
+  const comment = rig.posts.find((post) => post.path.includes('/issues/'));
+  assert.ok(comment, 'refuse-size must publish the sticky refusal summary');
+  assert.match(String((comment.body as { body: string }).body), /## Sentinel review: size_refused/);
+  assert.match(readFileSync(rig.env.GITHUB_OUTPUT as string, 'utf8'), /canonical_decision<<[^>]*\nsize_refused/);
+});
+
+test('refuse-size rejects a tampered or inapplicable size-refusal artifact', async (): Promise<void> => {
+  const lines = Array.from({ length: 1500 }, (_v, i) => `export const line${i} = ${i};`).join('\n') + '\n';
+  for (const tamper of ['headSha', 'blockChangedLines', 'changedLines'] as const) {
+    const rig = makeDispatchRig({}, { head: lines });
+    assert.equal(await runActionHost('reserve', { ...dispatchOptions(rig), out: rig.preparedDir }, rig.deps), 0);
+    const file = path.join(rig.preparedDir, 'size-refusal.json');
+    const refusal = JSON.parse(readFileSync(file, 'utf8'));
+    if (tamper === 'headSha') refusal.headSha = 'a'.repeat(40);
+    if (tamper === 'blockChangedLines') refusal.blockChangedLines = 900;
+    if (tamper === 'changedLines') refusal.changedLines = 100;
+    writeFileSync(file, JSON.stringify(refusal));
+    await assert.rejects(
+      () => runActionHost('refuse-size', { prepared: rig.preparedDir, systemRoot: SYSTEM_ROOT }, rig.deps),
+      tamper === 'headSha' ? /commits differ/ : tamper === 'blockChangedLines' ? /limit differs/ : /does not exceed/,
+      tamper,
+    );
+    assert.equal(rig.posts.length, 0, tamper);
+    assert.equal(rig.statuses.length, 0, tamper);
+  }
+});
+
+test('a PR at exactly the changed-line limit is not refused', async (): Promise<void> => {
+  const lines = Array.from({ length: 1499 }, (_v, i) => `export const line${i} = ${i};`).join('\n') + '\n';
+  const rig = makeDispatchRig({}, { head: lines });
+  assert.equal(await runActionHost('reserve', { ...dispatchOptions(rig), out: rig.preparedDir }, rig.deps), 0);
+  assert.equal(rig.pushes.length, 1);
+  assert.ok(existsSync(path.join(rig.preparedDir, 'request.json')));
+  assert.equal(existsSync(path.join(rig.preparedDir, 'size-refusal.json')), false);
+});
+
+test('renderSizeRefusal publishes a trusted refusal summary', (): void => {
+  const body = renderSizeRefusal(1501, 1500, 'gha-7-3', 'https://github.com/devrev/sentinel/actions/runs/7');
+  assert.match(body, /^## Sentinel review: size_refused\n/);
+  assert.match(body, /1,501 changed lines, over the agreed 1,500-line limit/);
+  assert.match(body, /split into smaller, independently reviewable pull requests\. No review was run\./);
+  assert.match(body, /\*\*Run:\*\* `gha-7-3` · \[workflow run\]\(https:\/\/github\.com\/devrev\/sentinel\/actions\/runs\/7\)/);
+  assert.match(body, /<!-- sentinel-review -->\n$/);
+});
+
+test('materialize fails closed when a dependency neighbor is unreadable', async (): Promise<void> => {
+  const neighbor = `import { required } from './action';\nexport const consumer = required;\n${'// pad\n'.repeat(80)}`;
+  const rig = makeRig({ extraBase: [{ path: 'src/consumer.ts', content: neighbor }] });
+  rig.env.SENTINEL_REVIEW_MAX_READ_BYTES = '400';
+  const opts = { sourceCheckout: rig.source.repo.dir, stateCheckout: rig.stateDir, systemRoot: SYSTEM_ROOT };
+  assert.equal(await runActionHost('reserve', { ...opts, out: rig.preparedDir }, rig.deps), 0);
+  const code = await runActionHost('materialize', { sourceCheckout: rig.source.repo.dir, prepared: rig.preparedDir, out: rig.outDir, systemRoot: SYSTEM_ROOT }, rig.deps);
+  assert.equal(code, 3);
+  const result = JSON.parse(readFileSync(path.join(rig.outDir, 'omissions.json'), 'utf8'));
+  assert.ok(result.unavailableRequired.some((entry: string) => entry.includes('head:src/consumer.ts: dependency neighbor of a changed path is unreadable')));
+  assert.deepEqual(result.omissions, []);
+});
+
+test('materialize lists non-neighbor omissions in the prompt and omits the section when clean', async (): Promise<void> => {
+  const unrelated = `export const unrelated = 1;\n${'// pad\n'.repeat(80)}`;
+  const rig = makeRig({ extraBase: [{ path: 'src/unrelated.ts', content: unrelated }] });
+  rig.env.SENTINEL_REVIEW_MAX_READ_BYTES = '400';
+  rig.env.GITHUB_OUTPUT = path.join(mkdtempSync(path.join(tmpdir(), 'srs-out-')), 'out.txt');
+  const opts = { sourceCheckout: rig.source.repo.dir, stateCheckout: rig.stateDir, systemRoot: SYSTEM_ROOT };
+  assert.equal(await runActionHost('reserve', { ...opts, out: rig.preparedDir }, rig.deps), 0);
+  assert.equal(await runActionHost('materialize', { sourceCheckout: rig.source.repo.dir, prepared: rig.preparedDir, out: rig.outDir, systemRoot: SYSTEM_ROOT }, rig.deps), 0);
+  const output = readFileSync(rig.env.GITHUB_OUTPUT, 'utf8');
+  assert.match(output, /# Omitted source\n[^\n]*\n- head:src\/unrelated\.ts: /);
+
+  const clean = makeRig();
+  clean.env.GITHUB_OUTPUT = path.join(mkdtempSync(path.join(tmpdir(), 'srs-out-')), 'out.txt');
+  const cleanOpts = { sourceCheckout: clean.source.repo.dir, stateCheckout: clean.stateDir, systemRoot: SYSTEM_ROOT };
+  assert.equal(await runActionHost('reserve', { ...cleanOpts, out: clean.preparedDir }, clean.deps), 0);
+  assert.equal(await runActionHost('materialize', { sourceCheckout: clean.source.repo.dir, prepared: clean.preparedDir, out: clean.outDir, systemRoot: SYSTEM_ROOT }, clean.deps), 0);
+  assert.doesNotMatch(readFileSync(clean.env.GITHUB_OUTPUT, 'utf8'), /Omitted source/);
 });

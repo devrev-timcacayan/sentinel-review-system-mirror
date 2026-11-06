@@ -404,7 +404,7 @@ test('manual dispatch workflow exposes one PR input and the canonical guards', (
   const investigateJob = template.split('\n  investigate:')[1].split('\n  claude-auto-review:')[0];
   const finalJob = template.split('\n  claude-auto-review:')[1];
   assert.match(prepareJob, /if: \$\{\{ github\.event_name == 'workflow_dispatch' \}\}/);
-  assert.match(investigateJob, /if: \$\{\{ github\.event_name == 'workflow_dispatch' && needs\.prepare\.result == 'success' \}\}/);
+  assert.match(investigateJob, /if: \$\{\{ github\.event_name == 'workflow_dispatch' && needs\.prepare\.result == 'success' && needs\.prepare\.outputs\.size_refused != 'true' \}\}/);
   assert.match(finalJob, /if: \$\{\{ always\(\) && github\.event_name == 'workflow_dispatch' \}\}/);
   assert.match(prepareJob, /statuses: write/);
   assert.match(finalJob, /statuses: write/);
@@ -416,8 +416,14 @@ test('manual dispatch workflow exposes one PR input and the canonical guards', (
   const stateIdx = prepareJob.indexOf('Checkout existing operational state branch');
   assert.ok(startIdx > -1 && stateIdx > -1 && startIdx < stateIdx, 'pending status before state checkout');
   const fallbackStep = finalJob.split('action-host fail-status')[0].split('id: finalize')[1];
-  assert.match(fallbackStep, /if: \$\{\{ always\(\) && steps\.finalize\.outputs\.canonical_decision == '' \}\}/);
+  assert.match(fallbackStep, /if: \$\{\{ always\(\) && steps\.finalize\.outputs\.canonical_decision == '' && steps\.size_refusal\.outputs\.canonical_decision == '' \}\}/);
   assert.doesNotMatch(finalJob.split('id: finalize')[1].split('- name: Mark the exact PR head review failed')[0], /continue-on-error/);
+  assert.match(prepareJob, /size_refused: \$\{\{ steps\.prepare\.outputs\.size_refused \}\}/);
+  const refusalStep = finalJob.split('id: size_refusal')[1].split('id: finalize')[0];
+  assert.match(refusalStep, /if: \$\{\{ needs\.prepare\.outputs\.size_refused == 'true' \}\}/);
+  assert.match(refusalStep, /action-host refuse-size \\\n\s+--prepared "\$RUNNER_TEMP\/prepared"/);
+  const finalizeStep = finalJob.split('id: finalize')[1].split('- name: Mark the exact PR head review failed')[0];
+  assert.match(finalizeStep, /if: \$\{\{ needs\.prepare\.outputs\.size_refused != 'true' \}\}/);
   assert.match(prepareJob, /ref: \$\{\{ env\.REVIEW_SYSTEM_REF \}\}/);
   assert.match(prepareJob, /git -C review-system rev-parse HEAD/);
   assert.match(prepareJob, />> "\$GITHUB_OUTPUT"/);

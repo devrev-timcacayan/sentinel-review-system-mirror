@@ -31,7 +31,7 @@ function fixture(): { bundleDir: string; snapshot: ReviewSnapshot; ledger: Revie
     },
     previousHeadSha: null,
     changes: [{ path: 'src/a.ts', status: 'modified' }],
-    size: { changedLines: 1, warnChangedLines: 800, blockChangedLines: 1500, outcome: 'within_threshold' },
+    size: { changedLines: 1, blockChangedLines: 1500 },
     files: [
       { path: 'src/a.ts', revision: 'base', content: 'export const x = 1;\n' },
       { path: 'src/a.ts', revision: 'head', content: 'export const x = 2;\n' },
