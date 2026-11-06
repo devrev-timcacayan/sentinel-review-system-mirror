@@ -194,9 +194,16 @@ roll back the persisted ledger. The fallback step records an error status in
 that case. Historical cloud runs (probe `41797946024`, checkout
 `41839027490`) are prior evidence, not re-verified here.
 
-Contract notes worth knowing: the coverage cross-check that requires every
-dependency neighbor in `relatedPaths` applies only to `reliability-impact`
-entries; `sourceReads` is the validator's audit of what it actually loaded, found
+Contract notes worth knowing: dependency/caller relationships are cross-checked
+only in `reliability-impact` entries. An unchanged neighbor must appear in the
+changed file's `relatedPaths`. Between two changed files, naming the relationship
+in either file's reviewed `reliability-impact` entry is sufficient; both files
+still need reviewed `reliability-impact` entries and all required dimension
+entries. Merely marking both files reviewed, or naming the relationship only in
+another dimension, is insufficient. Current or previous rename paths may identify
+an endpoint only when unambiguous.
+
+`sourceReads` is the validator's audit of what it actually loaded, found
 absent, or verified present, not an input allowlist or proof that the model
 inspected those files; coverage `relatedPaths` are verified by tree existence
 only and are never loaded; `maxFiles` counts only evidence-only loads, so

@@ -441,6 +441,17 @@ export function evaluateSingleReview(
     }
   }
 
+  const changedPathOwners = new Map<string, string | null>();
+  for (const change of snapshot.changes) {
+    for (const alias of new Set([change.path, ...(change.previousPath ? [change.previousPath] : [])])) {
+      const owner = changedPathOwners.get(alias);
+      changedPathOwners.set(alias, owner === undefined || owner === change.path ? change.path : null);
+    }
+  }
+  const reviewedImpact = new Map(report.coverage
+    .filter((entry): boolean => entry.dimension === 'reliability-impact' && entry.assessment === 'reviewed')
+    .map((entry): [string, Coverage] => [entry.path, entry]));
+
   const coverageKeys = report.coverage.map((entry): string => `${entry.path}:${entry.dimension}`);
   if (duplicateValues(coverageKeys).length > 0) add('Coverage contains duplicate entries.');
   for (const entry of report.coverage) {
@@ -465,7 +476,18 @@ export function evaluateSingleReview(
       ]).filter((path: string): boolean => !relevantPaths.has(path)));
       if (neighbors.size > 0 && entry.assessment !== 'reviewed') add(`Dependency impact requires review for ${change.path}.`);
       for (const neighbor of neighbors) {
-        if (!entry.relatedPaths.includes(neighbor)) add(`Impact review omitted dependency/caller ${neighbor} of ${change.path}.`);
+        const owner = changedPathOwners.get(neighbor);
+        const acknowledgedHere = entry.relatedPaths.includes(neighbor)
+          || (owner !== undefined && owner !== null
+            && entry.relatedPaths.some((path: string): boolean => changedPathOwners.get(path) === owner));
+        if (acknowledgedHere) continue;
+        const neighborImpact = owner ? reviewedImpact.get(owner) : undefined;
+        // A changed-to-changed relationship needs one acknowledgement, not two.
+        // Ambiguous rename aliases cannot transfer that acknowledgement.
+        const acknowledgedByNeighbor = entry.assessment === 'reviewed' && neighborImpact !== undefined
+          && neighborImpact.relatedPaths.some((path: string): boolean =>
+            relevantPaths.has(path) && changedPathOwners.get(path) === change.path);
+        if (!acknowledgedByNeighbor) add(`Impact review omitted dependency/caller ${neighbor} of ${change.path}.`);
       }
     }
   }
