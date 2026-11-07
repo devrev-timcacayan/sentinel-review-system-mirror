@@ -127,14 +127,10 @@ test('every nested report must match every exact parent identity field', (): voi
   }
 });
 
-test('incomplete, blocked, or invalid-evidence partitions keep the aggregate incomplete', (): void => {
+test('incomplete or blocked partitions keep the aggregate incomplete', (): void => {
   for (const mutation of [
     (input: PartitionedReviewReport): void => { input.reports[0].report.complete = false; },
     (input: PartitionedReviewReport): void => { input.reports[0].report.coverage[0].assessment = 'blocked'; },
-    (input: PartitionedReviewReport): void => {
-      input.reports[0].report.findings = [finding()];
-      input.reports[0].report.findings[0].introducedBy.quote = 'invented quote';
-    },
   ]) {
     const { snapshot, envelope, previous, policy } = fixture();
     mutation(envelope);
@@ -142,7 +138,18 @@ test('incomplete, blocked, or invalid-evidence partitions keep the aggregate inc
   }
 });
 
-test('a citation available only in another partition is not valid local evidence', (): void => {
+test('a partition finding whose quote never verifies is dropped from a clean aggregate', (): void => {
+  const { snapshot, envelope, previous, policy } = fixture();
+  envelope.reports[0].report.findings = [finding()];
+  envelope.reports[0].report.findings[0].introducedBy.quote = 'invented quote';
+  const decision = evaluateReview(snapshot, envelope, previous, policy);
+  assert.equal(decision.status, 'needs_attention');
+  assert.equal(decision.ledger.openFindings.length, 0);
+  assert.equal(decision.unverifiedFindings?.length, 1);
+  assert.equal(decision.unverifiedFindings?.[0].finding.id, 'F-setup');
+});
+
+test('a citation outside its partition scope is re-verified against the full snapshot', (): void => {
   const { snapshot, envelope, previous, policy } = fixture();
   const firstPart = snapshot.partitionManifest!.partitions[0];
   const foreign = snapshot.files.find((file): boolean => !firstPart.sourceKeys.includes(sourceKey(file)))!;
@@ -150,7 +157,11 @@ test('a citation available only in another partition is not valid local evidence
     ...finding(),
     evidence: [{ path: foreign.path, revision: foreign.revision, startLine: 1, endLine: 1, quote: foreign.content.split('\n')[0] }],
   }];
-  assert.equal(evaluateReview(snapshot, envelope, previous, policy).status, 'incomplete');
+  // The partition packet cannot see the file, but the aggregate gate verifies
+  // the same quote against the captured snapshot and keeps the finding.
+  const decision = evaluateReview(snapshot, envelope, previous, policy);
+  assert.equal(decision.status, 'changes_required');
+  assert.equal(decision.ledger.openFindings[0].id, 'F-setup');
 });
 
 test('one evidenced blocker survives other clean partitions', (): void => {

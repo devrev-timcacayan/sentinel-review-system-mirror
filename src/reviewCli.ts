@@ -136,9 +136,14 @@ export async function main(argv: string[]): Promise<number> {
     attempts: result.attempts.length,
     budget: result.budget,
     decisionReasons: result.decision.reasons,
+    citationAdjustments: (result.decision.citationAdjustments ?? []).length,
+    unverifiedFindings: (result.decision.unverifiedFindings ?? []).map((item): Record<string, unknown> => ({
+      findingId: item.finding.id, title: item.finding.title, severity: item.finding.severity, reason: item.reason,
+    })),
   }, null, 2));
   if (result.decision.status === 'pass') return 0;
   if (result.decision.status === 'changes_required') return 2;
+  if (result.decision.status === 'needs_attention') return 4;
   return 3;
 }
 

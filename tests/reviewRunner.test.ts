@@ -8,7 +8,7 @@ import { createMockProvider } from '../src/mockProvider.ts';
 import { buildReviewBundle } from '../src/partitionPlanner.ts';
 import { projectPartition } from '../src/partitionContract.ts';
 import { ALLOWED_REPOSITORY, loadTestPolicy, makeReport } from './helpers.ts';
-import type { ReviewLedger, ReviewSnapshot } from '../src/contracts.ts';
+import type { Finding, Reconciliation, ReviewLedger, ReviewSnapshot } from '../src/contracts.ts';
 
 function emptyLedger(): ReviewLedger {
   return { schemaVersion: 1, repository: ALLOWED_REPOSITORY, pullRequest: 7, lastHeadSha: null, openFindings: [] };
@@ -142,30 +142,49 @@ function mockConfig(): Record<string, unknown> {
   };
 }
 
+// A resolution citation failure is the one report-level defect still sent to
+// model repair: finding citations re-anchor or drop deterministically, and an
+// 'open' attestation's unverifiable evidence is recorded, never fatal.
+function priorReconciliation(badQuote: boolean): { finding: Finding; reconciliation: Reconciliation; ledger: ReviewLedger } {
+  const prior: Finding = {
+    id: 'f-prior',
+    ruleId: 'novel',
+    severity: 'advisory',
+    title: 'prior issue',
+    explanation: 'ex',
+    impact: 'im',
+    introducedBy: { path: 'src/a.ts', revision: 'head', startLine: 1, endLine: 1, quote: 'export const x = 1;' },
+    evidence: [{ path: 'src/a.ts', revision: 'head', startLine: 1, endLine: 1, quote: 'export const x = 1;' }],
+    counterEvidence: [],
+  };
+  return {
+    finding: prior,
+    reconciliation: {
+      findingId: 'f-prior',
+      outcome: 'withdrawn',
+      rationale: 'no longer applies',
+      evidence: [{ path: 'src/a.ts', revision: 'head', startLine: 1, endLine: 1, quote: badQuote ? 'NOT THE REAL LINE' : 'export const x = 1;' }],
+    },
+    ledger: { ...emptyLedger(), openFindings: [structuredClone(prior)] },
+  };
+}
+
 test('one citation-only repair succeeds with exactly two calls for that part', async (): Promise<void> => {
   const { snapshot, loaded } = parentWith(1);
   const part = snapshot.partitionManifest!.partitions[0];
   const scoped = projectPartition(snapshot, part);
+  const prior = priorReconciliation(true);
   const original = makeReport(scoped, {
-    findings: [{
-      id: 'f-1',
-      ruleId: 'novel',
-      severity: 'advisory',
-      title: 'issue',
-      explanation: 'ex',
-      impact: 'im',
-      introducedBy: { path: 'src/a.ts', revision: 'head', startLine: 1, endLine: 1, quote: 'export const x = 1;' },
-      evidence: [{ path: 'src/a.ts', revision: 'head', startLine: 1, endLine: 1, quote: 'NOT THE REAL LINE' }],
-      counterEvidence: [],
-    }],
+    findings: [],
+    reconciliations: [prior.reconciliation],
   });
   const repaired = structuredClone(original);
-  repaired.findings[0].evidence[0].quote = 'export const x = 1;';
+  repaired.reconciliations[0].evidence[0].quote = 'export const x = 1;';
   const fixture = mockFixture([
     { partitionId: part.id, phase: 'review', inputTokens: 100, reply: reply({ partitionId: part.id, report: original }) },
     { partitionId: part.id, phase: 'repair', inputTokens: 150, reply: reply({ partitionId: part.id, report: repaired }) },
   ]);
-  const result = await runPartitionReview(snapshot, emptyLedger(), loaded, createMockProvider(fixture), {
+  const result = await runPartitionReview(snapshot, prior.ledger, loaded, createMockProvider(fixture), {
     outputDirectory: mkdtempSync(path.join(tmpdir(), 'srs-rep-')) + '/o',
     maxSpendMicros: 1_000_000,
     execute: false,
@@ -179,34 +198,26 @@ test('a repair that alters protected fields keeps the original and never calls a
   const { snapshot, loaded } = parentWith(1);
   const part = snapshot.partitionManifest!.partitions[0];
   const scoped = projectPartition(snapshot, part);
+  const prior = priorReconciliation(true);
   const original = makeReport(scoped, {
-    findings: [{
-      id: 'f-2',
-      ruleId: 'novel',
-      severity: 'advisory',
-      title: 'issue',
-      explanation: 'ex',
-      impact: 'im',
-      introducedBy: { path: 'src/a.ts', revision: 'head', startLine: 1, endLine: 1, quote: 'export const x = 1;' },
-      evidence: [{ path: 'src/a.ts', revision: 'head', startLine: 1, endLine: 1, quote: 'BAD QUOTE' }],
-      counterEvidence: [],
-    }],
+    findings: [],
+    reconciliations: [prior.reconciliation],
   });
   const tampered = structuredClone(original);
-  tampered.findings[0].severity = 'blocker';
-  tampered.findings[0].evidence[0].quote = 'export const x = 1;';
+  tampered.reconciliations[0].rationale = 'altered rationale';
+  tampered.reconciliations[0].evidence[0].quote = 'export const x = 1;';
   const fixture = mockFixture([
     { partitionId: part.id, phase: 'review', inputTokens: 100, reply: reply({ partitionId: part.id, report: original }) },
     { partitionId: part.id, phase: 'repair', inputTokens: 150, reply: reply({ partitionId: part.id, report: tampered }) },
   ]);
-  const result = await runPartitionReview(snapshot, emptyLedger(), loaded, createMockProvider(fixture), {
+  const result = await runPartitionReview(snapshot, prior.ledger, loaded, createMockProvider(fixture), {
     outputDirectory: mkdtempSync(path.join(tmpdir(), 'srs-rep2-')) + '/o',
     maxSpendMicros: 1_000_000,
     execute: false,
   });
   assert.equal(result.attempts.length, 2, 'max two calls total for the part');
   const report = result.report.reports.find((row) => row.partitionId === part.id)?.report;
-  assert.equal(report?.findings[0]?.severity, 'advisory', 'original report retained, tampered repair rejected');
+  assert.equal(report?.reconciliations[0]?.rationale, 'no longer applies', 'original report retained, tampered repair rejected');
   assert.equal(result.decision.status !== 'pass', true, 'retained report with its original citation error cannot pass');
 });
 

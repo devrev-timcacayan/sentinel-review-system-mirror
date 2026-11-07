@@ -547,6 +547,19 @@ test('terminal statuses map decisions and status failures never emit a decision'
     assert.equal(rig.statuses[0].sha, rig.source.headSha);
     assert.match(readFileSync(rig.env.GITHUB_OUTPUT as string, 'utf8'), /changes_required/);
   }
+  // open non-blocker findings -> success labelled needs_attention, exit 0
+  {
+    const rig = makeDispatchRig({}, MULTI_LINE_FILES);
+    assert.equal(await runActionHost('reserve', { ...dispatchOptions(rig), out: rig.preparedDir }, rig.deps), 0);
+    const report = reportFor(rig);
+    report.findings = [finding('F-note', 'question', evidenceAt('head', 5, 'const e = 50;'))];
+    writeResult(rig, report);
+    const finOut = path.join(mkdtempSync(path.join(tmpdir(), 'finn-')), 'out');
+    assert.equal(await runActionHost('finalize', { ...dispatchOptions(rig), prepared: rig.preparedDir, result: rig.resultDir, out: finOut }, rig.deps), 0, 'needs_attention must not fail the workflow');
+    assert.deepEqual(rig.statuses.map((s) => s.state), ['success']);
+    assert.match(String(rig.statuses[0].body.description), /1 open item\(s\) need a reviewer decision/);
+    assert.match(readFileSync(rig.env.GITHUB_OUTPUT as string, 'utf8'), /needs_attention/);
+  }
   // missing execution evidence -> error
   {
     const rig = makeDispatchRig();
@@ -914,6 +927,30 @@ test('renderSummary caps reasons, lists findings one line each, and keeps the ma
   assert.doesNotMatch(blocked, /synthetic explanation|synthetic impact/, 'no explanation or impact prose');
 });
 
+test('renderSummary hides excluded findings on incomplete and when the id stays open in the ledger', (): void => {
+  const dropped = { finding: finding('F-drop', 'advisory', evidenceAt('head', 5, 'INVENTED')), reason: 'quote does not appear in the cited source' };
+  const emptyLedger = { schemaVersion: 1 as const, repository: REPO, pullRequest: 17, lastHeadSha: null, openFindings: [] as Finding[] };
+  const incomplete = renderSummary(
+    { status: 'incomplete', reasons: ['unusable execution'], ledger: emptyLedger, unverifiedFindings: [dropped] },
+    'gha-7-3', 'https://github.com/devrev/sentinel/actions/runs/7',
+  );
+  assert.doesNotMatch(incomplete, /Excluded from verdict/, 'incomplete posts no review, so nothing is posted for reference');
+  // A dropped re-citation of a still-open finding surfaces only as the verified ledger entry.
+  const prior = finding('F-prior', 'blocker', evidenceAt('base', 5, 'const e = 5;'));
+  const duped = renderSummary(
+    {
+      status: 'changes_required',
+      reasons: [prior.title],
+      ledger: { ...emptyLedger, openFindings: [prior] },
+      unverifiedFindings: [dropped, { finding: prior, reason: 'still-open reconciliation evidence: quote does not appear in the cited source' }],
+    },
+    'gha-7-3', 'https://github.com/devrev/sentinel/actions/runs/7',
+  );
+  assert.match(duped, /\*\*Excluded from verdict:\*\* 1 finding was dropped/, 'only the non-ledger drop is counted');
+  assert.match(duped, /`F-drop synthetic title claude`/);
+  assert.doesNotMatch(duped, /unverified advisory\] `F-prior|possible blocker, unverified\] `F-prior/, 'the still-open prior is never listed as unverified');
+});
+
 test('finalize posts a formal review with inline and file-level comments after the summary', async (): Promise<void> => {
   const rig = makeDispatchRig({}, MULTI_LINE_FILES);
   assert.equal(await runActionHost('reserve', { ...dispatchOptions(rig), out: rig.preparedDir }, rig.deps), 0);
@@ -950,6 +987,63 @@ test('finalize posts a formal review with inline and file-level comments after t
   assert.equal(await runActionHost('finalize', { ...dispatchOptions(clean), prepared: clean.preparedDir, result: clean.resultDir, out: path.join(mkdtempSync(path.join(tmpdir(), 'finp-')), 'out') }, clean.deps), 0);
   const passReview = reviewPosts(clean)[0];
   assert.equal((passReview.body as { event: string }).event, 'COMMENT');
+});
+
+test('finalize notes re-anchored and unverified findings without letting them block', async (): Promise<void> => {
+  const rig = makeDispatchRig({}, MULTI_LINE_FILES);
+  assert.equal(await runActionHost('reserve', { ...dispatchOptions(rig), out: rig.preparedDir }, rig.deps), 0);
+  const report = reportFor(rig);
+  report.findings = [
+    // 'const e = 50;' sits at head line 5 but is cited one line low: unique match re-anchors.
+    finding('F-drift', 'advisory', evidenceAt('head', 6, 'const e = 50;')),
+    // An invented quote cannot be tied to the code: dropped, never a blocker.
+    finding('F-ghost', 'blocker', evidenceAt('head', 5, 'const invented = 1;')),
+  ];
+  writeResult(rig, report);
+  const finOut = path.join(mkdtempSync(path.join(tmpdir(), 'finu-')), 'out');
+  assert.equal(await runActionHost('finalize', { ...dispatchOptions(rig), prepared: rig.preparedDir, result: rig.resultDir, out: finOut }, rig.deps), 0, 'an unverified blocker must not fail the run');
+  const summary = rig.posts.find((post: HttpRequest): boolean => post.path === '/repos/devrev/sentinel/issues/17/comments');
+  const summaryBody = String((summary?.body as { body: string }).body);
+  assert.match(summaryBody, /## Sentinel review: needs_attention/);
+  assert.match(summaryBody, /- \[advisory\] `F-drift synthetic title claude` \(`src\/action\.ts`:5\)/, 'the re-anchored finding renders at its corrected line');
+  assert.match(summaryBody, /\*\*Citations adjusted:\*\*/);
+  assert.match(summaryBody, /`F-drift` \(`src\/action\.ts`\): line 6 adjusted to line 5/);
+  assert.match(summaryBody, /\*\*Excluded from verdict:\*\* 1 finding was dropped because a quote could not be matched to the code\. Posted for reference only\./);
+  assert.match(summaryBody, /- \[possible blocker, unverified\] `F-ghost synthetic title claude` \(`src\/action\.ts`\)/);
+  const review = rig.posts.find((post: HttpRequest): boolean => post.path === '/repos/devrev/sentinel/pulls/17/reviews');
+  assert.ok(review, 'a needs_attention verdict posts a COMMENT review');
+  const body = review.body as { event: string; comments: Record<string, unknown>[] };
+  assert.equal(body.event, 'COMMENT', 'unverified findings never request changes');
+  assert.equal(body.comments.length, 2);
+  assert.deepEqual({ path: body.comments[1].path, subject_type: body.comments[1].subject_type }, { path: 'src/action.ts', subject_type: 'file' }, 'unverified findings post file-level only');
+  assert.match(String(body.comments[1].body), /\[possible blocker, unverified\]/);
+  assert.match(String(body.comments[1].body), /Excluded from the review verdict; shown for reference only\./);
+  const state = JSON.parse(readFileSync(path.join(rig.stateDir, 'prs', '17.json'), 'utf8')) as { status: string };
+  assert.equal(state.status, 'needs_attention');
+});
+
+test('a re-cited prior finding with a failed quote posts once, never as unverified', async (): Promise<void> => {
+  const rig = makeDispatchRig({}, MULTI_LINE_FILES);
+  seedPriorBlocker(rig);
+  assert.equal(await runActionHost('reserve', { ...dispatchOptions(rig), out: rig.preparedDir }, rig.deps), 0);
+  const report = reportFor(rig);
+  // The re-citation of F-prior cannot be verified, so it drops; the prior
+  // stays open on its original record and is the only thing that posts.
+  report.findings = [finding('F-prior', 'blocker', evidenceAt('head', 5, 'INVENTED QUOTE'))];
+  report.reconciliations = [{
+    findingId: 'F-prior', outcome: 'open', rationale: 'Still applies.',
+    evidence: [evidenceAt('head', 5, 'const e = 50;')],
+  }];
+  writeResult(rig, report);
+  const finOut = path.join(mkdtempSync(path.join(tmpdir(), 'find-')), 'out');
+  assert.equal(await runActionHost('finalize', { ...dispatchOptions(rig), prepared: rig.preparedDir, result: rig.resultDir, out: finOut }, rig.deps), 2, 'the retained prior blocker still requires changes');
+  const summaryBody = String((rig.posts.find((post: HttpRequest): boolean => post.path === '/repos/devrev/sentinel/issues/17/comments')?.body as { body: string }).body);
+  assert.match(summaryBody, /- \[blocker\] `Synthetic prior blocker/, 'the retained prior posts with its original record');
+  assert.doesNotMatch(summaryBody, /Excluded from verdict/, 'a dropped re-citation of a ledger-open finding is audit only');
+  const body = reviewPosts(rig)[0].body as { event: string; comments: Record<string, unknown>[] };
+  assert.equal(body.comments.length, 1, 'the prior posts exactly once, as the verified finding');
+  assert.match(String(body.comments[0].body), /\*\*\[blocker\] Synthetic prior blocker/);
+  assert.doesNotMatch(String(body.comments[0].body), /unverified/);
 });
 
 test('finalize skips the review on incomplete, retries file-level on 422, and fails closed otherwise', async (): Promise<void> => {

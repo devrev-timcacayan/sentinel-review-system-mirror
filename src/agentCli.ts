@@ -181,5 +181,6 @@ export function commandValidateAgent(args: string[]): number {
   }, null, 2));
   if (result.status === 'pass') return 0;
   if (result.status === 'changes_required') return 2;
+  if (result.status === 'needs_attention') return 4;
   return 3;
 }

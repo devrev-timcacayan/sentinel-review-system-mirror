@@ -3,6 +3,7 @@ import { changedAndPreviousPaths, parseDiffLines, shiftLineRange } from './diffL
 import type { FileDelta } from './diffLines.ts';
 import { evaluatePartitionedReview } from './partitionGate.ts';
 import type {
+  CitationAdjustment,
   Coverage,
   DependencyEdge,
   Evidence,
@@ -15,6 +16,8 @@ import type {
   ReviewReport,
   ReviewSnapshot,
   SizeAssessment,
+  SourceFile,
+  UnverifiedFinding,
 } from './contracts.ts';
 
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
@@ -158,6 +161,51 @@ function duplicateValues(values: string[]): string[] {
 
 function normalizeQuote(quote: string): string {
   return quote.split('\n').map((line: string): string => line.trimStart()).join('\n');
+}
+
+interface LineRange {
+  startLine: number;
+  endLine: number;
+}
+
+// A drifted citation is re-anchored only when its quote matches exactly one
+// location in the same file at the same revision, under the same leading-
+// whitespace normalization evidenceExists applies. Zero matches leaves the
+// evidence unverifiable; two or more is ambiguous and cannot be chosen
+// deterministically.
+function relocateQuote(source: SourceFile, evidence: Evidence): LineRange | 'ambiguous' | null {
+  const quoted = normalizeQuote(evidence.quote);
+  const quoteLineCount = evidence.quote.split('\n').length;
+  const lines = source.content.split('\n');
+  let match: LineRange | null = null;
+  for (let index = 0; index + quoteLineCount <= lines.length; index += 1) {
+    const candidate = lines.slice(index, index + quoteLineCount).map((line: string): string => line.trimStart()).join('\n');
+    if (candidate !== quoted) continue;
+    if (match !== null) return 'ambiguous';
+    match = { startLine: index + 1, endLine: index + quoteLineCount };
+  }
+  return match;
+}
+
+type EvidenceVerification =
+  | { verifiable: true; evidence: Evidence; adjusted: { from: LineRange; to: LineRange } | null }
+  | { verifiable: false; reason: string };
+
+// Exact verification first; when the quote fails its declared range, one
+// deterministic re-anchor is attempted against the same file and revision.
+// The returned evidence is always a copy; report input is never mutated.
+function verifyEvidence(snapshot: ReviewEvaluationContext, evidence: Evidence): EvidenceVerification {
+  if (evidenceExists(snapshot, evidence)) return { verifiable: true, evidence, adjusted: null };
+  const source = snapshot.files.find((file): boolean => file.path === evidence.path && file.revision === evidence.revision);
+  if (source === undefined) return { verifiable: false, reason: 'cited source is unavailable to this review' };
+  const relocated = relocateQuote(source, evidence);
+  if (relocated === 'ambiguous') return { verifiable: false, reason: 'quote matches multiple locations in the cited source' };
+  if (relocated === null) return { verifiable: false, reason: 'quote does not appear in the cited source' };
+  return {
+    verifiable: true,
+    evidence: { ...evidence, startLine: relocated.startLine, endLine: relocated.endLine },
+    adjusted: { from: { startLine: evidence.startLine, endLine: evidence.endLine }, to: relocated },
+  };
 }
 
 export interface PriorOverlapMatch {
@@ -331,6 +379,14 @@ function checkResolution(args: ResolutionArgs): string | null {
   return null;
 }
 
+// An unverified finding that is still open in the ledger under the same id is
+// audit only: it publishes once, as the verified ledger entry. This filter is
+// the single rule the verdict count and the host's publication both apply.
+export function publishableUnverifiedFindings(decision: GateDecision): UnverifiedFinding[] {
+  const openIds = new Set(decision.ledger.openFindings.map((finding): string => finding.id));
+  return (decision.unverifiedFindings ?? []).filter((item: UnverifiedFinding): boolean => !openIds.has(item.finding.id));
+}
+
 export function evaluateReview(
   snapshot: ReviewSnapshot,
   input: unknown,
@@ -352,6 +408,8 @@ export interface PartitionReportInspection {
   repairable: boolean;
   issues: string[];
   report: ReviewReport | null;
+  citationAdjustments: CitationAdjustment[];
+  unverifiedFindings: UnverifiedFinding[];
 }
 
 export function inspectPartitionReport(
@@ -361,18 +419,22 @@ export function inspectPartitionReport(
   policy: ReviewPolicy,
 ): PartitionReportInspection {
   if (!snapshot.partitionScope || snapshot.partitionManifest) {
-    return { accepted: false, repairable: false, issues: ['Inspection requires a projected partition, not a parent review.'], report: null };
+    return { accepted: false, repairable: false, issues: ['Inspection requires a projected partition, not a parent review.'], report: null, citationAdjustments: [], unverifiedFindings: [] };
   }
   const decision = evaluateSingleReview(snapshot, input, previous, policy);
   const report = isReport(input) ? input : null;
+  // Finding citations no longer reach this check: the gate re-anchors a
+  // drifted quote that matches once and drops what it cannot verify. Only a
+  // reconciliation citation failure still asks the model for a bounded repair.
   const citationOnly = decision.reasons.length === 1
-    && (/^Finding ".*" has evidence absent from the captured source\.$/s.test(decision.reasons[0])
-      || /^Reconciliation for ".*" has unavailable code evidence\.$/s.test(decision.reasons[0]));
+    && /^Reconciliation for ".*" has unavailable code evidence\.$/s.test(decision.reasons[0]);
   return {
     accepted: decision.status !== 'incomplete',
     repairable: report !== null && report.complete && report.limitations.length === 0 && citationOnly,
     issues: decision.reasons,
     report,
+    citationAdjustments: decision.citationAdjustments ?? [],
+    unverifiedFindings: decision.unverifiedFindings ?? [],
   };
 }
 
@@ -383,7 +445,22 @@ export function evaluateSingleReview(
   policy: ReviewPolicy,
   observations?: ResolutionObservations,
 ): GateDecision {
-  const invalid = (reason: string): GateDecision => ({
+  const citationAdjustments: CitationAdjustment[] = [];
+  const unverifiedFindings: UnverifiedFinding[] = [];
+  // One quote cited in two slots still reads as a single re-anchor in the audit.
+  const recordAdjustment = (adjustment: CitationAdjustment): void => {
+    if (!citationAdjustments.some((item): boolean => JSON.stringify(item) === JSON.stringify(adjustment))) {
+      citationAdjustments.push(adjustment);
+    }
+  };
+  // Whatever verdict is reached still carries the deterministic citation work
+  // and the excluded findings as audit data.
+  const audited = (decision: GateDecision): GateDecision => ({
+    ...decision,
+    ...(citationAdjustments.length > 0 ? { citationAdjustments } : {}),
+    ...(unverifiedFindings.length > 0 ? { unverifiedFindings } : {}),
+  });
+  const invalid = (reason: string): GateDecision => audited({
     status: 'incomplete',
     reasons: [reason],
     ledger: structuredClone(previous),
@@ -497,14 +574,34 @@ export function evaluateSingleReview(
   const reconciliationIds = report.reconciliations.map((item): string => item.findingId);
   if (duplicateValues(reconciliationIds).length > 0) return invalid('Report has duplicate reconciliation IDs.');
   const ruleIds = new Set(policy.rules.map((rule): string => rule.id));
+  const verifiedFindings: Finding[] = [];
   for (const finding of report.findings) {
     if (!ruleIds.has(finding.ruleId) && finding.ruleId !== 'novel') return invalid(`Unknown rule: ${finding.ruleId}.`);
     if (finding.ruleId === 'novel' && finding.severity === 'blocker') return invalid('A novel concern cannot establish blocking policy.');
     if (!attributedPaths.has(finding.introducedBy.path)) return invalid(`Finding "${finding.title}" is not attributed to a changed path.`);
-    if (![finding.introducedBy, ...finding.evidence].every((evidence): boolean => evidenceExists(snapshot, evidence))) {
-      return invalid(`Finding "${finding.title}" has evidence absent from the captured source.`);
+    const pieces: Evidence[] = [];
+    let verifiable = true;
+    for (const item of [finding.introducedBy, ...finding.evidence]) {
+      const checked = verifyEvidence(snapshot, item);
+      if (!checked.verifiable) {
+        unverifiedFindings.push({ finding, reason: checked.reason });
+        verifiable = false;
+        break;
+      }
+      pieces.push(checked.evidence);
+      if (checked.adjusted !== null) {
+        recordAdjustment({
+          kind: 'finding', findingId: finding.id, path: item.path, revision: item.revision,
+          from: checked.adjusted.from, to: checked.adjusted.to,
+        });
+      }
     }
+    if (verifiable) verifiedFindings.push({ ...finding, introducedBy: pieces[0], evidence: pieces.slice(1) });
   }
+  // A dropped finding cannot post, persist, satisfy an open reconciliation, or
+  // anchor re-raise checks: downstream evaluation sees only verified findings.
+  const gatedReport: ReviewReport = { ...report, findings: verifiedFindings, reconciliations: [] };
+  const verifiedFindingIds = new Set(verifiedFindings.map((finding): string => finding.id));
 
   const priorById = new Map(previous.openFindings.map((finding): [string, Finding] => [finding.id, finding]));
   const priorTitle = (id: string): string => priorById.get(id)?.title ?? id;
@@ -527,18 +624,50 @@ export function evaluateSingleReview(
   for (const reconciliation of report.reconciliations) {
     const prior = priorById.get(reconciliation.findingId);
     if (prior === undefined) return invalid(`Reconciliation references an unknown prior finding: ${reconciliation.findingId}.`);
-    if (!reconciliation.evidence.every((evidence): boolean => evidenceExists(snapshot, evidence))) {
+    const verifiedEvidence: Evidence[] = [];
+    let verifiable = true;
+    let unverifiedReason = '';
+    for (const item of reconciliation.evidence) {
+      const checked = verifyEvidence(snapshot, item);
+      if (!checked.verifiable) {
+        verifiable = false;
+        unverifiedReason = checked.reason;
+        break;
+      }
+      verifiedEvidence.push(checked.evidence);
+      if (checked.adjusted !== null) {
+        recordAdjustment({
+          kind: 'reconciliation', findingId: reconciliation.findingId, path: item.path, revision: item.revision,
+          from: checked.adjusted.from, to: checked.adjusted.to,
+        });
+      }
+    }
+    // Resolutions stay fail-closed: a 'fixed' or 'withdrawn' claim can
+    // re-anchor a drifted quote but can never rest on unverifiable evidence.
+    // An 'open' outcome only asserts what is already the default — the prior
+    // stays open — so unverifiable support evidence there is recorded against
+    // the prior, not fatal.
+    if (!verifiable && reconciliation.outcome !== 'open') {
       return invalid(`Reconciliation for "${priorTitle(reconciliation.findingId)}" has unavailable code evidence.`);
     }
-    if (reconciliation.outcome !== 'open' && findingIds.includes(reconciliation.findingId)) {
+    if (!verifiable) {
+      unverifiedFindings.push({ finding: prior, reason: `still-open reconciliation evidence: ${unverifiedReason}` });
+    }
+    const gatedReconciliation: Reconciliation = { ...reconciliation, evidence: verifiedEvidence };
+    gatedReport.reconciliations.push(gatedReconciliation);
+    if (reconciliation.outcome !== 'open' && verifiedFindingIds.has(reconciliation.findingId)) {
       return invalid(`Finding "${priorTitle(reconciliation.findingId)}" is both open and resolved.`);
     }
     if (reconciliation.outcome === 'open') continue;
-    const resolutionError = checkResolution({ reconciliation, prior, report, delta, renameTargets, dependencyEdges: snapshot.dependencyEdges, priorFindingPaths, observations });
+    const resolutionError = checkResolution({ reconciliation: gatedReconciliation, prior, report: gatedReport, delta, renameTargets, dependencyEdges: snapshot.dependencyEdges, priorFindingPaths, observations });
     if (resolutionError !== null) return invalid(resolutionError);
   }
   for (const prior of previous.openFindings) {
-    const reconciliation = report.reconciliations.find((item): boolean => item.findingId === prior.id);
+    const reconciliation = gatedReport.reconciliations.find((item): boolean => item.findingId === prior.id);
+    // An 'open' claim must stand behind the finding by re-citing it, but a
+    // re-citation that fails verification cannot clear the prior either: it
+    // stays open on its original record. Lookup is against the raw report for
+    // that reason; verified or dropped both satisfy the presence rule.
     const current = report.findings.find((finding): boolean => finding.id === prior.id);
     if (current && (current.ruleId !== prior.ruleId || current.severity !== prior.severity)) {
       return invalid(`Finding "${prior.title}" changed rule or severity without authorized adjudication.`);
@@ -552,11 +681,11 @@ export function evaluateSingleReview(
 
   const retained = new Map(previous.openFindings.map((finding): [string, Finding] => [finding.id, finding]));
   if (reasons.length === 0) {
-    for (const reconciliation of report.reconciliations) {
+    for (const reconciliation of gatedReport.reconciliations) {
       if (reconciliation.outcome !== 'open') retained.delete(reconciliation.findingId);
     }
   }
-  for (const finding of report.findings) retained.set(finding.id, finding);
+  for (const finding of gatedReport.findings) retained.set(finding.id, finding);
   const ledger: ReviewLedger = {
     schemaVersion: 1,
     repository: snapshot.identity.repository,
@@ -564,9 +693,20 @@ export function evaluateSingleReview(
     lastHeadSha: reasons.length === 0 ? snapshot.identity.headSha : previous.lastHeadSha,
     openFindings: structuredClone([...retained.values()]),
   };
-  if (reasons.length > 0) return { status: 'incomplete', reasons: [...new Set(reasons)], ledger };
+  if (reasons.length > 0) return audited({ status: 'incomplete', reasons: [...new Set(reasons)], ledger });
   const blockers = ledger.openFindings.filter((finding): boolean => finding.severity === 'blocker');
-  return blockers.length > 0
-    ? { status: 'changes_required', reasons: blockers.map((finding): string => finding.title), ledger }
-    : { status: 'pass', reasons: [], ledger };
+  if (blockers.length > 0) {
+    return audited({ status: 'changes_required', reasons: blockers.map((finding): string => finding.title), ledger });
+  }
+  // Open advisories and questions are a completed verdict that still needs a
+  // reviewer decision. Unverified findings publish as pending items too, so a
+  // pass must mean nothing at all is left for a reviewer to look at.
+  const attentionReasons: string[] = [];
+  if (ledger.openFindings.length > 0) attentionReasons.push(`${String(ledger.openFindings.length)} open item(s) need a reviewer decision`);
+  const publishableDrops = unverifiedFindings.filter((item): boolean =>
+    !ledger.openFindings.some((open): boolean => open.id === item.finding.id));
+  if (publishableDrops.length > 0) attentionReasons.push(`${String(publishableDrops.length)} finding(s) could not be verified and were excluded from the verdict`);
+  return audited(attentionReasons.length > 0
+    ? { status: 'needs_attention', reasons: attentionReasons, ledger }
+    : { status: 'pass', reasons: [], ledger });
 }

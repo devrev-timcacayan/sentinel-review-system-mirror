@@ -246,6 +246,7 @@ function commandRecord(args: string[]): number {
   if (superseded) return 3;
   if (decision.status === 'pass') return 0;
   if (decision.status === 'changes_required') return 2;
+  if (decision.status === 'needs_attention') return 4;
   return 3;
 }
 

@@ -107,12 +107,52 @@ test('evidenced blocker requires changes independent of reviewer verdict prose',
   assert.equal(evaluateReview(snapshot, report, previous, POLICY).status, 'changes_required');
 });
 
-test('advisory and uncertain questions do not become blockers', (): void => {
+test('advisory and uncertain questions need attention without becoming blockers', (): void => {
   for (const severity of ['advisory', 'question'] as const) {
     const { snapshot, report, previous } = fixture();
     report.findings = [{ ...blocker(), severity }];
-    assert.equal(evaluateReview(snapshot, report, previous, POLICY).status, 'pass');
+    const decision = evaluateReview(snapshot, report, previous, POLICY);
+    assert.equal(decision.status, 'needs_attention');
+    assert.deepEqual(decision.reasons, ['1 open item(s) need a reviewer decision']);
   }
+});
+
+test('pass means nothing is open: blocker, open item, and clean verdicts are distinct', (): void => {
+  const blockerRun = fixture();
+  blockerRun.report.findings = [blocker()];
+  assert.equal(evaluateReview(blockerRun.snapshot, blockerRun.report, blockerRun.previous, POLICY).status, 'changes_required');
+  const attentionRun = fixture();
+  attentionRun.report.findings = [{ ...blocker(), id: 'F-note', ruleId: 'SR-004', severity: 'question' }];
+  assert.equal(evaluateReview(attentionRun.snapshot, attentionRun.report, attentionRun.previous, POLICY).status, 'needs_attention');
+  const cleanRun = fixture();
+  cleanRun.report.findings = [];
+  assert.equal(evaluateReview(cleanRun.snapshot, cleanRun.report, cleanRun.previous, POLICY).status, 'pass');
+});
+
+test('an unverified-only report is needs_attention, never a clean pass', (): void => {
+  const { snapshot, report, previous } = fixture();
+  report.findings = [blocker()];
+  report.findings[0].evidence[0].quote = 'invented evidence';
+  const decision = evaluateReview(snapshot, report, previous, POLICY);
+  assert.equal(decision.status, 'needs_attention');
+  assert.deepEqual(decision.reasons, ['1 finding(s) could not be verified and were excluded from the verdict']);
+  assert.equal(decision.ledger.openFindings.length, 0);
+  assert.equal(decision.unverifiedFindings?.length, 1);
+});
+
+test('a dropped re-citation counts once, as the still-open item, not also as excluded', (): void => {
+  const { snapshot, report, previous } = priorFixture();
+  previous.openFindings = [{ ...blocker(), severity: 'advisory' }];
+  report.findings = [{
+    ...blocker(), severity: 'advisory',
+    evidence: [{ path: 'src/action.ts', revision: 'head', startLine: 1, endLine: 1, quote: 'invented quote' }],
+  }];
+  report.reconciliations = [{ findingId: 'F-setup', outcome: 'open', rationale: 'Still applies.', evidence: [evidence()] }];
+  const decision = evaluateReview(snapshot, report, previous, POLICY);
+  assert.equal(decision.status, 'needs_attention');
+  assert.deepEqual(decision.reasons, ['1 open item(s) need a reviewer decision']);
+  assert.equal(decision.ledger.openFindings.length, 1);
+  assert.equal(decision.unverifiedFindings?.length, 1, 'the failed re-citation stays audit-visible');
 });
 
 test('every provenance field must match the captured review identity', (): void => {
@@ -190,13 +230,170 @@ test('blocked or limited source/reviewer coverage is never a pass', (): void => 
   }
 });
 
-test('finding evidence must match captured lines and revision exactly', (): void => {
-  for (const bad of [{ quote: 'invented evidence' }, { startLine: 99, endLine: 99 }, { path: '../outside.ts' }, { revision: 'base' as const }]) {
+test('a finding whose evidence cannot be verified is dropped, never the verdict', (): void => {
+  for (const bad of [{ quote: 'invented evidence' }, { revision: 'base' as const }]) {
     const { snapshot, report, previous } = fixture();
     report.findings = [blocker()];
     Object.assign(report.findings[0].evidence[0], bad);
-    assert.equal(evaluateReview(snapshot, report, previous, POLICY).status, 'incomplete');
+    const decision = evaluateReview(snapshot, report, previous, POLICY);
+    // An unverified finding never enters the ledger or blocks, but it still
+    // publishes as a pending item, so the verdict is needs_attention not pass.
+    assert.equal(decision.status, 'needs_attention');
+    assert.equal(decision.ledger.openFindings.length, 0, 'an unverified blocker never enters the ledger');
+    assert.equal(decision.unverifiedFindings?.length, 1);
+    assert.equal(decision.unverifiedFindings?.[0].finding.id, 'F-setup');
+    assert.equal(decision.unverifiedFindings?.[0].reason, 'quote does not appear in the cited source');
   }
+  // Evidence that is malformed rather than unverifiable still rejects the report.
+  const { snapshot, report, previous } = fixture();
+  report.findings = [blocker()];
+  Object.assign(report.findings[0].evidence[0], { path: '../outside.ts' });
+  assert.equal(evaluateReview(snapshot, report, previous, POLICY).status, 'incomplete');
+});
+
+test('a drifted citation re-anchors to its unique match in the same file and revision', (): void => {
+  const { snapshot, report, previous } = fixture();
+  report.findings = [blocker()];
+  report.findings[0].evidence[0].startLine = 99;
+  report.findings[0].evidence[0].endLine = 99;
+  const decision = evaluateReview(snapshot, report, previous, POLICY);
+  assert.equal(decision.status, 'changes_required');
+  assert.deepEqual(decision.citationAdjustments, [{
+    kind: 'finding',
+    findingId: 'F-setup',
+    path: 'src/action.ts',
+    revision: 'head',
+    from: { startLine: 99, endLine: 99 },
+    to: { startLine: 1, endLine: 1 },
+  }]);
+  // The input report is never mutated; the ledger carries the corrected range.
+  assert.equal(report.findings[0].evidence[0].startLine, 99);
+  assert.equal(decision.ledger.openFindings[0].evidence[0].startLine, 1);
+});
+
+test('a multi-line quote re-anchors to its unique match one line up', (): void => {
+  const { snapshot, report, previous } = fixture();
+  snapshot.files[1].content = 'export const a = 1;\nexport const required = false;\nexport const b = 2;\n';
+  report.findings = [blocker()];
+  const item = report.findings[0].evidence[0];
+  item.startLine = 3;
+  item.endLine = 4;
+  item.quote = 'export const required = false;\nexport const b = 2;';
+  const decision = evaluateReview(snapshot, report, previous, POLICY);
+  assert.equal(decision.status, 'changes_required');
+  // introducedBy drifted to line 2 as well; both pieces record their re-anchor.
+  assert.deepEqual(decision.citationAdjustments, [
+    {
+      kind: 'finding',
+      findingId: 'F-setup',
+      path: 'src/action.ts',
+      revision: 'head',
+      from: { startLine: 1, endLine: 1 },
+      to: { startLine: 2, endLine: 2 },
+    },
+    {
+      kind: 'finding',
+      findingId: 'F-setup',
+      path: 'src/action.ts',
+      revision: 'head',
+      from: { startLine: 3, endLine: 4 },
+      to: { startLine: 2, endLine: 3 },
+    },
+  ]);
+});
+
+test('an ambiguous or empty-match quote is dropped, never guessed', (): void => {
+  const { snapshot, report, previous } = fixture();
+  snapshot.files[2].content = 'export const required = false;\nexport const required = false;\n';
+  report.findings = [blocker()];
+  const item = report.findings[0].evidence[1];
+  item.startLine = 3;
+  item.endLine = 3;
+  const decision = evaluateReview(snapshot, report, previous, POLICY);
+  assert.equal(decision.status, 'needs_attention');
+  assert.equal(decision.unverifiedFindings?.[0].reason, 'quote matches multiple locations in the cited source');
+});
+
+test('reconciliation evidence re-anchors but resolutions stay fail-closed on unverifiable quotes', (): void => {
+  const { snapshot, report, previous } = fixture();
+  previous.openFindings = [blocker()];
+  previous.lastHeadSha = FIRST_SHA;
+  snapshot.previousHeadSha = FIRST_SHA;
+  snapshot.identity.headSha = NEXT_SHA;
+  snapshot.identity.runId = 'run-2';
+  report.identity = structuredClone(snapshot.identity);
+  report.findings = [blocker()];
+  report.reconciliations = [{
+    findingId: 'F-setup',
+    outcome: 'open',
+    rationale: 'Still applies at the new head.',
+    evidence: [{ path: 'src/action.ts', revision: 'head', startLine: 99, endLine: 99, quote: 'export const required = false;' }],
+  }];
+  const decision = evaluateReview(snapshot, report, previous, POLICY);
+  assert.equal(decision.status, 'changes_required');
+  assert.equal(decision.citationAdjustments?.[0].kind, 'reconciliation');
+  const { snapshot: s2, report: r2, previous: p2 } = fixture();
+  p2.openFindings = [blocker()];
+  p2.lastHeadSha = FIRST_SHA;
+  s2.previousHeadSha = FIRST_SHA;
+  s2.identity.headSha = NEXT_SHA;
+  s2.identity.runId = 'run-2';
+  r2.identity = structuredClone(s2.identity);
+  r2.findings = [blocker()];
+  r2.reconciliations = [{
+    findingId: 'F-setup',
+    outcome: 'withdrawn',
+    rationale: 'No longer applies at the new head.',
+    evidence: [{ path: 'src/action.ts', revision: 'head', startLine: 1, endLine: 1, quote: 'invented quote' }],
+  }];
+  const failed = evaluateReview(s2, r2, p2, POLICY);
+  assert.equal(failed.status, 'incomplete');
+  assert.match(failed.reasons.join(' '), /unavailable code evidence/);
+});
+
+test('unverifiable still-open support evidence is recorded, not fatal', (): void => {
+  const { snapshot, report, previous } = fixture();
+  previous.openFindings = [blocker()];
+  previous.lastHeadSha = FIRST_SHA;
+  snapshot.previousHeadSha = FIRST_SHA;
+  snapshot.identity.headSha = NEXT_SHA;
+  snapshot.identity.runId = 'run-2';
+  report.identity = structuredClone(snapshot.identity);
+  report.findings = [blocker()];
+  report.reconciliations = [{
+    findingId: 'F-setup',
+    outcome: 'open',
+    rationale: 'Still applies at the new head.',
+    evidence: [{ path: 'src/action.ts', revision: 'head', startLine: 1, endLine: 1, quote: 'invented quote' }],
+  }];
+  const decision = evaluateReview(snapshot, report, previous, POLICY);
+  // 'open' asserts only what the default already is: the prior stays open on
+  // its original record whether or not the support evidence verifies.
+  assert.equal(decision.status, 'changes_required');
+  assert.equal(decision.unverifiedFindings?.length, 1);
+  assert.equal(decision.unverifiedFindings?.[0].finding.id, 'F-setup');
+  assert.match(decision.unverifiedFindings?.[0].reason ?? '', /still-open reconciliation evidence/);
+});
+
+test('an unverified finding cannot stand in for a prior blocker reconciliation', (): void => {
+  const { snapshot, report, previous } = fixture();
+  previous.openFindings = [blocker()];
+  previous.lastHeadSha = FIRST_SHA;
+  snapshot.previousHeadSha = FIRST_SHA;
+  snapshot.identity.headSha = NEXT_SHA;
+  snapshot.identity.runId = 'run-2';
+  report.identity = structuredClone(snapshot.identity);
+  report.findings = [blocker()];
+  report.findings[0].evidence[0].quote = 'invented evidence';
+  report.reconciliations = [{
+    findingId: 'F-setup',
+    outcome: 'open',
+    rationale: 'Still open.',
+    evidence: [evidence()],
+  }];
+  const decision = evaluateReview(snapshot, report, previous, POLICY);
+  assert.equal(decision.status, 'changes_required', 'the dropped re-citation cannot clear the still-open prior blocker');
+  assert.equal(decision.unverifiedFindings?.length, 1);
 });
 
 test('finding evidence tolerates dropped leading whitespace but rejects content drift', (): void => {
@@ -208,7 +405,9 @@ test('finding evidence tolerates dropped leading whitespace but rejects content 
   const { snapshot: s2, report: r2, previous: p2 } = fixture();
   r2.findings = [blocker()];
   r2.findings[0].evidence[0].quote = 'export const required = true;';
-  assert.equal(evaluateReview(s2, r2, p2, POLICY).status, 'incomplete');
+  const drifted = evaluateReview(s2, r2, p2, POLICY);
+  assert.equal(drifted.status, 'needs_attention');
+  assert.equal(drifted.unverifiedFindings?.length, 1);
 });
 
 test('unrelated pre-existing context does not establish a PR blocker', (): void => {
@@ -222,7 +421,7 @@ test('new rules cannot silently become blocking policy', (): void => {
   report.findings = [{ ...blocker(), ruleId: 'novel' }];
   assert.equal(evaluateReview(snapshot, report, previous, POLICY).status, 'incomplete');
   report.findings[0].severity = 'advisory';
-  assert.equal(evaluateReview(snapshot, report, previous, POLICY).status, 'pass');
+  assert.equal(evaluateReview(snapshot, report, previous, POLICY).status, 'needs_attention');
   report.findings[0].ruleId = 'invented-rule';
   assert.equal(evaluateReview(snapshot, report, previous, POLICY).status, 'incomplete');
 });
@@ -590,7 +789,7 @@ test('a withdrawn blocker re-raised within ten shifted lines is refused', (): vo
     evidence: [{ path: 'src/action.ts', revision: 'head', startLine: 27, endLine: 27, quote: 'export const filler27 = 27;' }],
   }];
   r2.reconciliations = [{ findingId: 'F-setup', outcome: 'withdrawn', rationale: 'Withdrawn.', evidence: [evidence()] }];
-  assert.equal(evaluateReview(s2, r2, p2, POLICY).status, 'pass');
+  assert.equal(evaluateReview(s2, r2, p2, POLICY).status, 'needs_attention');
 });
 
 test('a resolved blocker cannot be re-raised under a new id at lower severity', (): void => {
@@ -629,7 +828,7 @@ test('an allowed different-rule overlap after a fix is recorded as a resolution 
     report.reconciliations = [{ findingId: 'F-setup', outcome: 'fixed', rationale: 'Repaired.', evidence: [evidence()] }];
     const observations = { allowedFixedBlockerOverlaps: [] as ResolvedBlockerOverlap[], fixedEvidenceOutsideScope: [] as FixedEvidenceOutsideScope[] };
     const decision = evaluateSingleReview(snapshot, report, previous, POLICY, observations);
-    assert.equal(decision.status, 'pass', `${variant}: ${decision.reasons.join('\n')}`);
+    assert.equal(decision.status, 'needs_attention', `${variant}: ${decision.reasons.join('\n')}`);
     assert.equal(observations.allowedFixedBlockerOverlaps.length, 1, variant);
     assert.equal(observations.allowedFixedBlockerOverlaps[0].match, variant);
     assert.equal(observations.allowedFixedBlockerOverlaps[0].priorFindingId, 'F-setup');

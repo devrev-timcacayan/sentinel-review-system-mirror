@@ -465,6 +465,14 @@ function validateCore(
       fixedEvidenceOutsideScope,
       limitations,
       decision: { status: finalDecision.status, reasons: finalDecision.reasons },
+      citationAdjustments: finalDecision.citationAdjustments ?? [],
+      unverifiedFindings: (finalDecision.unverifiedFindings ?? []).map((item): Record<string, unknown> => ({
+        findingId: item.finding.id,
+        title: item.finding.title,
+        severity: item.finding.severity,
+        path: item.finding.introducedBy.path,
+        reason: item.reason,
+      })),
     };
     const decisionPath = path.join(outDir, 'decision.json');
     const auditPath = path.join(outDir, 'validation-audit.json');

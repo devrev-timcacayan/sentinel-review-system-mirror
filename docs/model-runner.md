@@ -41,12 +41,17 @@ parent plus the assembled envelope remains the sole final gate.
    released at zero cost. Reservations are owned per call: a count, fit, or
    reserve failure settles nothing and is certain, and only a started provider
    call can produce a conservative charge or `uncertainCharges`.
-4. `inspectModelResponse` scopes each reply to its partition; only a
-   citation-only repair is permitted once per part, separately counted and
-   reserved, and must satisfy `isCitationOnlyRepair` (no dropped findings,
-   severity changes, identity, coverage, completeness, or narrative edits).
-   A failed or protected-field repair retains the original parsed report so
-   the final gate stays incomplete.
+4. `inspectModelResponse` scopes each reply to its partition. Finding
+   citations are corrected inside the gate: a quote matching exactly one
+   location re-anchors and is recorded, while an absent or ambiguous quote
+   excludes only that finding as unverified. Only a resolution
+   (`fixed`/`withdrawn`) citation-only failure is sent to a bounded model
+   repair — unverifiable evidence behind an `open` outcome is recorded
+   against the still-open prior instead — once per part,
+   separately counted and reserved, and it must satisfy `isCitationOnlyRepair`
+   (no dropped findings, severity changes, identity, coverage, completeness,
+   or narrative edits). A failed or protected-field repair retains the
+   original parsed report so the final gate stays incomplete.
 5. The assembled `PartitionedReviewReport` envelope is always evaluated by
    `evaluateReview`. Missing parts stay missing; no synthesized pass is ever
    emitted. The envelope carries `synthetic`; mock output writes

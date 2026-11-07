@@ -136,10 +136,33 @@ export interface ReviewLedger {
   openFindings: Finding[];
 }
 
+// A citation whose quote failed its declared range but matched exactly one
+// location in the same file at the same revision. The gate rewrites the line
+// range to that single match; path, revision, and quote never change.
+export interface CitationAdjustment {
+  kind: 'finding' | 'reconciliation';
+  findingId: string;
+  path: string;
+  revision: Revision;
+  from: { startLine: number; endLine: number };
+  to: { startLine: number; endLine: number };
+}
+
+// A finding excluded from the verdict because at least one evidence quote
+// could not be tied to the captured source: the cited file was unavailable, or
+// the quote matched zero or more than one location. Unverified findings are
+// never posted as verdict findings and never enter the ledger.
+export interface UnverifiedFinding {
+  finding: Finding;
+  reason: string;
+}
+
 export interface GateDecision {
-  status: 'pass' | 'changes_required' | 'incomplete';
+  status: 'pass' | 'needs_attention' | 'changes_required' | 'incomplete';
   reasons: string[];
   ledger: ReviewLedger;
+  citationAdjustments?: CitationAdjustment[];
+  unverifiedFindings?: UnverifiedFinding[];
 }
 
 export interface ReviewPolicy {

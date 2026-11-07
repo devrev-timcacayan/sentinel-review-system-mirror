@@ -16,7 +16,8 @@ import { SizeRefusedError, listAgentTree, readAgentSource } from './snapshot.ts'
 import { gitRun, loadPrState, pendingStateVersion, completedStateVersion, persistPrState, validateStateCheckout } from './actionState.ts';
 import type { GitRunner, PrStateRecord } from './actionState.ts';
 import { writePacketFile } from './artifactFiles.ts';
-import type { Finding, GateDecision } from './contracts.ts';
+import type { Finding, GateDecision, UnverifiedFinding } from './contracts.ts';
+import { publishableUnverifiedFindings } from './gate.ts';
 
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const TITLE_PATTERN = /^POC Test: .+-DO NOT REVIEW$/;
@@ -634,6 +635,27 @@ export function renderSummary(decision: GateDecision, runId: string, runUrl: str
       lines.push(`- [${finding.severity}] ${codeSpan(finding.title)} (${codeSpan(finding.introducedBy.path)}:${String(finding.introducedBy.startLine)})`);
     }
   }
+  const rangeText = (range: { startLine: number; endLine: number }): string =>
+    range.startLine === range.endLine ? `line ${String(range.startLine)}` : `lines ${String(range.startLine)}-${String(range.endLine)}`;
+  const adjustments = decision.citationAdjustments ?? [];
+  if (adjustments.length > 0) {
+    lines.push('', `**Citations adjusted:** ${String(adjustments.length)} quote${adjustments.length === 1 ? ' was' : 's were'} re-anchored where each appeared exactly once in the cited file.`);
+    for (const adjustment of adjustments) {
+      lines.push(`- ${codeSpan(adjustment.findingId)} (${codeSpan(adjustment.path)}): ${rangeText(adjustment.from)} adjusted to ${rangeText(adjustment.to)}`);
+    }
+  }
+  // Dropped findings keep their model-assigned severity label but are marked
+  // unverified so nothing here reads as a validated claim. Incomplete
+  // decisions publish no review, so the section only exists when posting can.
+  const unverified = publishableUnverifiedFindings(decision);
+  if (decision.status !== 'incomplete' && unverified.length > 0) {
+    const noun = unverified.length === 1 ? 'finding was' : 'findings were';
+    lines.push('', `**Excluded from verdict:** ${String(unverified.length)} ${noun} dropped because a quote could not be matched to the code. Posted for reference only.`);
+    for (const item of unverified) {
+      const tag = item.finding.severity === 'blocker' ? 'possible blocker, unverified' : `unverified ${item.finding.severity}`;
+      lines.push(`- [${tag}] ${codeSpan(item.finding.title)} (${codeSpan(item.finding.introducedBy.path)})`);
+    }
+  }
   lines.push(
     '',
     `**Run:** ${codeSpan(runId)} · [workflow run](${runUrl})`,
@@ -693,17 +715,45 @@ function findingReviewBody(finding: Finding): string {
   return body.length > REVIEW_BODY_LIMIT ? `${body.slice(0, REVIEW_BODY_LIMIT - 3)}...` : body;
 }
 
+// publishableUnverifiedFindings (src/gate.ts) is the shared suppression rule:
+// a dropped re-citation of a finding that stays open in the ledger posts once,
+// as the verified ledger entry.
+
+// A dropped finding never earns an inline position: its line could not be
+// verified, so it always posts as a file-level comment that says so.
+function unverifiedReviewBody(item: UnverifiedFinding): string {
+  const finding = item.finding;
+  const tag = finding.severity === 'blocker' ? 'possible blocker' : finding.severity;
+  const body = [
+    `**[${tag}, unverified] ${sanitizeValue(finding.title)}**`,
+    '',
+    sanitizeValue(finding.explanation),
+    '',
+    `**Impact:** ${sanitizeValue(finding.impact)}`,
+    '',
+    `Not verified: ${sanitizeValue(item.reason)}. Excluded from the review verdict; shown for reference only.`,
+  ].join('\n');
+  return body.length > REVIEW_BODY_LIMIT ? `${body.slice(0, REVIEW_BODY_LIMIT - 3)}...` : body;
+}
+
 // Reviews are per-run, not sticky: every validated head posts a fresh review.
 async function postPullReview(deps: HostDeps, ctx: HostContext, decision: GateDecision, cumulativeDiff: string): Promise<void> {
   const headLines = diffHeadLines(cumulativeDiff);
-  const comments = (inline: boolean): Record<string, unknown>[] =>
-    decision.ledger.openFindings.map((finding: Finding): Record<string, unknown> => {
+  const comments = (inline: boolean): Record<string, unknown>[] => {
+    const verified = decision.ledger.openFindings.map((finding: Finding): Record<string, unknown> => {
       const introduced = finding.introducedBy;
       const body = findingReviewBody(finding);
       return inline && introduced.revision === 'head' && headLines.get(introduced.path)?.has(introduced.startLine) === true
         ? { path: introduced.path, line: introduced.startLine, side: 'RIGHT', body }
         : { path: introduced.path, subject_type: 'file', body };
     });
+    const dropped = publishableUnverifiedFindings(decision).map((item: UnverifiedFinding): Record<string, unknown> => ({
+      path: item.finding.introducedBy.path,
+      subject_type: 'file',
+      body: unverifiedReviewBody(item),
+    }));
+    return [...verified, ...dropped];
+  };
   const reviewBody = {
     commit_id: ctx.headSha,
     event: decision.status === 'changes_required' ? 'REQUEST_CHANGES' : 'COMMENT',
@@ -979,15 +1029,24 @@ async function stageFinalize(deps: HostDeps, options: Record<string, string>): P
   await publishStickySummary(deps, ctx.pullRequest, commentBody);
   // Findings land on the diff as a formal review after the summary succeeds.
   // An incomplete decision never validated a report, so its findings stay
-  // unpublished even though the ledger may still list prior ones.
-  if (decision.status !== 'incomplete' && decision.ledger.openFindings.length > 0) {
+  // unpublished even though the ledger may still list prior ones. Findings the
+  // gate excluded as unverified still publish as marked file-level comments;
+  // they never affect the review event, the ledger, or the commit status.
+  if (decision.status !== 'incomplete'
+    && (decision.ledger.openFindings.length > 0 || publishableUnverifiedFindings(decision).length > 0)) {
     await postPullReview(deps, ctx, decision, request.cumulativeDiff);
   }
-  const statusState = decision.status === 'pass' ? 'success' : decision.status === 'changes_required' ? 'failure' : 'error';
-  await postCommitStatus(deps, ctx.headSha, statusState, `Sentinel review: ${decision.status}.`);
+  const statusState = decision.status === 'changes_required' ? 'failure' : decision.status === 'incomplete' ? 'error' : 'success';
+  const statusDescription = decision.status === 'needs_attention'
+    ? `Sentinel review: ${String(decision.ledger.openFindings.length + publishableUnverifiedFindings(decision).length)} open item(s) need a reviewer decision.`
+    : `Sentinel review: ${decision.status}.`;
+  await postCommitStatus(deps, ctx.headSha, statusState, statusDescription);
   githubOutput(deps, { canonical_decision: decision.status });
   console.log(JSON.stringify({ status: decision.status }));
-  if (decision.status === 'pass') return 0;
+  // Deliberately divergent from the offline CLIs, which exit 4 on
+  // needs_attention: a nonzero step exit would fail the workflow job, and
+  // needs_attention must never block. The label rides on the commit status.
+  if (decision.status === 'pass' || decision.status === 'needs_attention') return 0;
   if (decision.status === 'changes_required') return 2;
   return 3;
 }

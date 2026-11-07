@@ -45,7 +45,7 @@ export interface PrStateRecord {
   runId: string;
   headSha: string;
   baseSha: string;
-  status: 'pending' | 'pass' | 'changes_required' | 'incomplete';
+  status: 'pending' | 'pass' | 'needs_attention' | 'changes_required' | 'incomplete';
 }
 
 export interface PrStateView {
@@ -103,7 +103,7 @@ export function validatePrStateRecord(input: unknown): PrStateRecord {
   check(typeof input.runId === 'string' && SAFE_ID_PATTERN.test(input.runId), 'PR state record runId invalid');
   check(typeof input.headSha === 'string' && SHA_PATTERN.test(input.headSha), 'PR state record headSha must be a 40-char SHA');
   check(typeof input.baseSha === 'string' && SHA_PATTERN.test(input.baseSha), 'PR state record baseSha must be a 40-char SHA');
-  check(['pending', 'pass', 'changes_required', 'incomplete'].includes(String(input.status)), 'PR state record status invalid');
+  check(['pending', 'pass', 'needs_attention', 'changes_required', 'incomplete'].includes(String(input.status)), 'PR state record status invalid');
   return input as unknown as PrStateRecord;
 }
 

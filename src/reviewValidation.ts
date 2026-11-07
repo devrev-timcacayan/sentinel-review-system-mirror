@@ -14,15 +14,15 @@ export function inspectModelResponse(
   try {
     parsed = parseStrictJson(text);
   } catch {
-    return { accepted: false, repairable: false, issues: ['Response must be one strict JSON object, without fences or prose.'], report: null };
+    return { accepted: false, repairable: false, issues: ['Response must be one strict JSON object, without fences or prose.'], report: null, citationAdjustments: [], unverifiedFindings: [] };
   }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return { accepted: false, repairable: false, issues: ['Partition response must be an object.'], report: null };
+    return { accepted: false, repairable: false, issues: ['Partition response must be an object.'], report: null, citationAdjustments: [], unverifiedFindings: [] };
   }
   const object = parsed as Record<string, unknown>;
   if (Object.keys(object).length !== 2 || !('partitionId' in object) || !('report' in object)
     || object.partitionId !== snapshot.partitionScope?.partitionId) {
-    return { accepted: false, repairable: false, issues: ['Response fields or assigned partition ID do not match.'], report: null };
+    return { accepted: false, repairable: false, issues: ['Response fields or assigned partition ID do not match.'], report: null, citationAdjustments: [], unverifiedFindings: [] };
   }
   return inspectPartitionReport(snapshot, object.report, previous, policy);
 }

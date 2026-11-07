@@ -23,7 +23,7 @@ This is a static, read-only investigation. Publishing and state changes belong t
 
 Retrieve only the relevant source needed for investigation, through the approved source-access mechanism. Preserve immutable revision identity. In evidence, `head` means the captured head SHA and `base` means the captured merge-base SHA, not the target branch's latest head. For renames, the old path belongs to base and the new path belongs to head.
 
-Use exact source paths and revisions, one-based inclusive line ranges, and quotes covering the entire declared source slice, excluding generated line-number prefixes. Preserve indentation where possible. The gate strips leading whitespace from each line before comparison, so a whitespace-only line compares as empty; line count and the remaining content, including internal and trailing whitespace, must still match. This tolerance does not permit a different path, revision, or line range. Required unavailable, unsafe, binary, symlinked, or otherwise unsupported source makes coverage incomplete. Do not execute reviewed code to resolve context.
+Use exact source paths and revisions, one-based inclusive line ranges, and quotes covering the entire declared source slice, excluding generated line-number prefixes. Preserve indentation where possible. The gate strips leading whitespace from each line before comparison, so a whitespace-only line compares as empty; line count and the remaining content, including internal and trailing whitespace, must still match. This tolerance does not permit a different path, revision, or line range. Take line numbers only from a file you have opened, never by counting diff rows. Required unavailable, unsafe, binary, symlinked, or otherwise unsupported source makes coverage incomplete. Do not execute reviewed code to resolve context.
 
 ## Completion and output
 
@@ -31,4 +31,4 @@ Return the supplied structured report shape, without a partition scope or an ind
 
 Report consequential findings without a quota; a clean PR needs no compulsory criticism. Mechanical style checks belong to maintained deterministic tooling. Do not claim runtime reproduction or application test execution from static reasoning.
 
-Budget or execution exhaustion is an incomplete review, not a clean result. Coverage is an attestation and exact citations establish source existence, not semantic correctness. Trusted validation and orchestration determine the final result.
+Budget or execution exhaustion is an incomplete review, not a clean result. Coverage is an attestation and exact citations establish source existence, not semantic correctness. Trusted validation and orchestration determine the final result. A `pass` verdict means nothing is left for a reviewer to look at; open advisories or questions, or findings the gate excludes as unverified, yield `needs_attention`, which does not request changes.

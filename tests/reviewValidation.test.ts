@@ -72,27 +72,46 @@ test('strict wrapping rejects prose, fences, duplicate report fields, extra fiel
   }
 });
 
-test('incorrect citation coordinates are repairable while exact supported citations are accepted', (): void => {
+test('a drifted finding citation is re-anchored deterministically, not sent to repair', (): void => {
   const { loaded, snapshot, previous, report } = fixture();
   const broken = structuredClone(report);
   broken.findings[0].evidence[0].startLine = 99;
   broken.findings[0].evidence[0].endLine = 99;
   const inspection = inspectModelResponse(response(broken), snapshot, previous, loaded.policy);
-  assert.equal(inspection.accepted, false);
-  assert.equal(inspection.repairable, true);
+  assert.equal(inspection.accepted, true);
+  assert.equal(inspection.repairable, false);
+  assert.deepEqual(inspection.citationAdjustments, [{
+    kind: 'finding',
+    findingId: 'F-setup',
+    path: 'src/action.ts',
+    revision: 'head',
+    from: { startLine: 99, endLine: 99 },
+    to: { startLine: 1, endLine: 1 },
+  }]);
   assert.equal(isCitationOnlyRepair(broken, report), true);
   assert.equal(inspectModelResponse(response(report), snapshot, previous, loaded.policy).accepted, true);
 });
 
-test('a reconciliation citation-only failure is repairable through the title-form reason', (): void => {
+test('a finding whose quote never matches is dropped without a repair call', (): void => {
+  const { loaded, snapshot, previous, report } = fixture();
+  const broken = structuredClone(report);
+  broken.findings[0].evidence[0].quote = 'NOT THE REAL LINE';
+  const inspection = inspectModelResponse(response(broken), snapshot, previous, loaded.policy);
+  assert.equal(inspection.accepted, true);
+  assert.equal(inspection.repairable, false);
+  assert.equal(inspection.unverifiedFindings.length, 1);
+  assert.equal(inspection.unverifiedFindings[0].finding.id, 'F-setup');
+});
+
+test('a resolution citation-only failure is repairable through the title-form reason', (): void => {
   const { loaded, snapshot, previous, report } = fixture();
   const prior = structuredClone(report.findings[0]);
   previous.openFindings = [prior];
   const badEvidence = structuredClone(prior.introducedBy);
-  badEvidence.startLine = 99;
-  badEvidence.endLine = 99;
+  badEvidence.quote = 'NOT THE REAL LINE';
+  report.findings = [];
   report.reconciliations = [{
-    findingId: 'F-setup', outcome: 'open', rationale: 'Still applies.', evidence: [badEvidence],
+    findingId: 'F-setup', outcome: 'withdrawn', rationale: 'No longer applies.', evidence: [badEvidence],
   }];
   const inspection = inspectModelResponse(response(report), snapshot, previous, loaded.policy);
   assert.equal(inspection.accepted, false);

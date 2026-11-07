@@ -257,6 +257,15 @@ export async function runPartitionReview(
         }
         const scoped = projectPartition(parent, (parent.partitionManifest?.partitions ?? []).find((part) => part.id === call.request.partitionId)!);
         const inspection = inspectModelResponse(reply.text, scoped, priorLedger, loaded.policy);
+        for (const item of inspection.unverifiedFindings) {
+          inspection.issues.push(`Finding "${item.finding.title}" excluded from the verdict: ${item.reason}.`);
+        }
+        for (const adjustment of inspection.citationAdjustments) {
+          inspection.issues.push(
+            `Citation adjusted for ${adjustment.kind} ${adjustment.findingId}: ${adjustment.path} `
+            + `${adjustment.from.startLine}-${adjustment.from.endLine} to ${adjustment.to.startLine}-${adjustment.to.endLine}.`,
+          );
+        }
         record.issues.push(...inspection.issues);
         if (inspection.accepted && inspection.report) {
           envelope.reports.push({ partitionId: call.request.partitionId, report: inspection.report });
@@ -318,6 +327,14 @@ export async function runPartitionReview(
     budget: budget.snapshot(),
     partCount: parent.partitionManifest?.partitions.length ?? 0,
     reportedParts: envelope.reports.length,
+    citationAdjustments: decision.citationAdjustments ?? [],
+    unverifiedFindings: (decision.unverifiedFindings ?? []).map((item): Record<string, unknown> => ({
+      findingId: item.finding.id,
+      title: item.finding.title,
+      severity: item.finding.severity,
+      path: item.finding.introducedBy.path,
+      reason: item.reason,
+    })),
   });
   return {
     synthetic,

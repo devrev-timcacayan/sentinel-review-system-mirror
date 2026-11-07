@@ -64,7 +64,7 @@ Responsibilities:
 2. Revalidate the prepared identity and trusted digest. Reject a result for a different repository, PR, base, head, merge base, policy, model, or run. Treat a changed live head/base or prior-state version as superseded/incomplete, not a current pass. A newer attempt supersedes an older pass even if the ledger bytes are unchanged.
 3. Parse strict JSON and the report schema, reject unexpected fields, and apply the preserved coverage/finding/reconciliation rules. The reviewer does not return an independently authoritative verdict.
 4. Resolve every claimed source path and citation from immutable Git objects using the revision rules below. Never accept model-supplied source bytes as verification. Retain the verified evidence ranges and source object identifiers as audit data; existence does not prove the model read or understood them.
-5. Return `decision.json` containing the existing `GateDecision` shape and a separate validation audit. Exit codes follow existing record conventions: 0 pass, 2 changes_required, 3 incomplete/superseded, 1 operational/input failure. Invalid input must never be exit 0.
+5. Return `decision.json` containing the existing `GateDecision` shape and a separate validation audit. Exit codes follow existing record conventions: 0 pass, 2 changes_required, 4 needs_attention, 3 incomplete/superseded, 1 operational/input failure. Invalid input must never be exit 0.
 
 A validated `GateDecision` is not, by itself, durable publication or merge authorization. The trusted workflow must recheck freshness and commit the result against the unchanged state version before publishing a successful check. Operational failures retain prior blockers and cannot reuse a historical clean result. Offline fabricated reports can exercise validation but cannot be published or recorded as real reviews.
 
@@ -78,8 +78,8 @@ Preserve these invariants from [contracts](../src/contracts.ts), [the gate](../s
 - Reliability-impact coverage must acknowledge the direct dependency/caller obligations. Derive these independently, not from paths the model elects to mention. Unchanged code may be read for impact; blockers must remain attributed to a changed path.
 - Findings retain their rule IDs, severities, concrete impact, introducedBy attribution, exact evidence, and counterevidence. Unknown rules are invalid; a novel concern cannot become a blocker.
 - Every prior open finding must be reconciled. Comments, thread dismissal, author disagreement, or omission cannot clear it. No automatic waivers, severity downgrades, or dropped blockers.
-- Exact evidence ranges and quotes are required. Do not silently repair, relocate, or normalize an invalid citation. An invalid report cannot trigger an automatically authorized paid repair.
-- No compulsory criticism, finding-count quota, or model-selected CLEAN marker. Valid complete reports with no blockers can pass; complete reports with blockers require changes; uncertainty about required coverage remains incomplete.
+- Exact evidence quotes are required, but a citation whose line numbers drifted may be corrected deterministically: when the quote matches exactly one location in the same file at the same revision, the gate re-anchors the range and records the adjustment in the decision and validation audit. A quote with zero or several matches leaves that finding unverified: it is excluded from the verdict, the ledger, and verdict findings, and it is surfaced separately as unverified. Resolution evidence (fixed or withdrawn) that stays unverifiable remains invalid and can never clear a prior finding; an `open` claim whose support evidence cannot be verified is recorded against the prior, which stays open by default. An invalid report cannot trigger an automatically authorized paid repair.
+- No compulsory criticism, finding-count quota, or model-selected CLEAN marker. A `pass` verdict means nothing is left for a reviewer to look at: valid complete reports with open advisories or questions, or findings excluded as unverified, yield `needs_attention`, a completed non-blocking verdict that a reviewer must decide; complete reports with blockers require changes; uncertainty about required coverage remains incomplete.
 
 Do not create a second copy of finding/reconciliation decision logic. Refactor shared validation behind an internal source-lookup seam while preserving packet-mode behavior and regression tests. Agent and packet preparation remain distinct; do not fabricate a dependency-closed snapshot or redefine its completeness to make the old gate accept an agent report.
 
@@ -91,7 +91,7 @@ For existing `Evidence.revision` values, `head` means `identity.headSha` and `ba
 
 - For added paths, inspect head source. For deleted paths, inspect merge-base source. For renamed paths, use `previousPath` at merge base and the new path at head. Review changed before/after behavior, not only added lines.
 - Validate paths and object types before source access. Preserve refusal of traversal, secret-like paths, symlinks, submodules, binary/unavailable required source, and required source that cannot be examined safely. Never follow a symlink outside the repository or execute repository code to resolve an import.
-- Evidence uses one-based inclusive line ranges and exact source text, with existing line-splitting semantics. Numbering added for presentation is not part of the quote. An out-of-range or wrong-revision citation is invalid.
+- Evidence uses one-based inclusive line ranges and exact source text, with existing line-splitting semantics. Numbering added for presentation is not part of the quote. An out-of-range citation re-anchors only when its quote matches exactly one location; otherwise the finding is unverified and excluded.
 - The model may investigate with approved file/search/reference tools, but working-tree reads are trustworthy only for an explicitly prepared immutable source view. Claude Code Action restores some configuration paths from the target base branch; that restored view is not identical to PR head for those paths. Changed guidance must be inspected through exact Git objects or a separately prepared source view.
 - Source availability and coverage rationale are attestations, not proof of exhaustive impact analysis or actual tool use. Tool restriction, credential isolation, configuration loading, and protection of trusted artifacts must be verified before a credentialed run. A read-only sentence in a prompt is insufficient.
 
@@ -176,8 +176,8 @@ incomplete, never silently prepared.
 
 `validate-agent` writes `decision.json` (`kind: "offline-agent-decision"`),
 `validation-audit.json`, and a preserved copy of the report bytes, exiting 0 synthetic
-pass, 2 synthetic changes_required, 3 incomplete, 1 malformed invocation/input. A synthetic
-pass demonstrates contract mechanics only and authorizes nothing.
+pass, 2 synthetic changes_required, 4 synthetic needs_attention, 3 incomplete, 1 malformed
+invocation/input. A synthetic pass demonstrates contract mechanics only and authorizes nothing.
 
 The shared single-review gate accepts a narrowed `ReviewEvaluationContext` whose `files`
 are a locally verified evidence cache built from immutable Git objects, not a packet served

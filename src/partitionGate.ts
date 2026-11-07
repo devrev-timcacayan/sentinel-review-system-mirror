@@ -1,4 +1,4 @@
-import type { Coverage, Finding, GateDecision, Reconciliation, ReviewLedger, ReviewPolicy, ReviewReport, ReviewSnapshot } from './contracts.ts';
+import type { CitationAdjustment, Coverage, Finding, GateDecision, Reconciliation, ReviewLedger, ReviewPolicy, ReviewReport, ReviewSnapshot, UnverifiedFinding } from './contracts.ts';
 import { canonicalJson, projectPartition, validatePartitionManifest } from './partitionContract.ts';
 
 type SingleReviewGate = (snapshot: ReviewSnapshot, report: unknown, previous: ReviewLedger, policy: ReviewPolicy) => GateDecision;
@@ -20,6 +20,25 @@ export function evaluatePartitionedReview(
   evaluateSingle: SingleReviewGate,
 ): GateDecision {
   const decisions: GateDecision[] = [];
+  const citationAdjustments = new Map<string, CitationAdjustment>();
+  const partitionUnverified: UnverifiedFinding[] = [];
+  const unverifiedKeys = new Set<string>();
+  const collect = (decision: GateDecision): void => {
+    for (const adjustment of decision.citationAdjustments ?? []) {
+      citationAdjustments.set(canonicalJson(adjustment), adjustment);
+    }
+    for (const item of decision.unverifiedFindings ?? []) {
+      const key = `${item.finding.id} ${item.reason}`;
+      if (!unverifiedKeys.has(key)) {
+        unverifiedKeys.add(key);
+        partitionUnverified.push(item);
+      }
+    }
+  };
+  const auditFields = (): Pick<GateDecision, 'citationAdjustments' | 'unverifiedFindings'> => ({
+    ...(citationAdjustments.size > 0 ? { citationAdjustments: [...citationAdjustments.values()] } : {}),
+    ...(partitionUnverified.length > 0 ? { unverifiedFindings: partitionUnverified } : {}),
+  });
   const incomplete = (reasons: string[]): GateDecision => {
     const retained = new Map(previous.openFindings.map((finding): [string, Finding] => [finding.id, structuredClone(finding)]));
     const priorIds = new Set(retained.keys());
@@ -35,6 +54,7 @@ export function evaluatePartitionedReview(
       status: 'incomplete',
       reasons: [...new Set(reasons)],
       ledger: { ...structuredClone(previous), openFindings: [...retained.values()] },
+      ...auditFields(),
     };
   };
   try {
@@ -64,6 +84,7 @@ export function evaluatePartitionedReview(
     if (!reportMap.has(partition.id)) continue;
     const decision = evaluateSingle(projectPartition(snapshot, partition), reportMap.get(partition.id), previous, policy);
     decisions.push(decision);
+    collect(decision);
     if (decision.status === 'incomplete') {
       reasons.push(...decision.reasons.map((reason): string => `${partition.id}: ${reason}`));
       continue;
@@ -124,5 +145,15 @@ export function evaluatePartitionedReview(
     reconciliations: [...reconciliations.values()],
   };
   // Recheck global caller coverage and evidence after combining the partition attestations.
-  return evaluateSingle(snapshot, aggregate, previous, policy);
+  // The parent gate re-verifies every merged finding against the full snapshot, so a
+  // citation dropped inside one partition is rescued when the evidence verifies in
+  // full scope, and only the parent decision's unverifiedFindings are authoritative
+  // for what will not post.
+  const final = evaluateSingle(snapshot, aggregate, previous, policy);
+  for (const adjustment of final.citationAdjustments ?? []) {
+    citationAdjustments.set(canonicalJson(adjustment), adjustment);
+  }
+  return citationAdjustments.size > 0
+    ? { ...final, citationAdjustments: [...citationAdjustments.values()] }
+    : final;
 }

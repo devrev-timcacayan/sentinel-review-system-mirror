@@ -107,15 +107,23 @@ preparation job and run-scoped Actions artifact transport, not a signature.
   this run, verifies the receipt via `verifyActionExecution` (model, limits,
   session, single-execution trace), runs `validateActionReview`, persists
   `${runId}-completed` state, pushes fast-forward, then publishes the
-  `## Sentinel review` summary comment and, when a validated pass or
-  changes_required decision has findings, a formal PR review. The comment is
+  `## Sentinel review` summary comment and, when a validated pass,
+  needs_attention, or changes_required decision has findings, a formal PR
+  review. The comment is
   compact: the status, up to five reasons (a `+N more` line beyond that), a
   one-line-per-finding list, and the run link; no finding explanation or
-  impact text. The review posts findings as inline comments anchored on
+  impact text. It also carries a `Citations adjusted` section when the gate
+  re-anchored a drifted quote to its unique match, and an `Excluded from
+  verdict` section listing findings dropped because a quote could not be
+  matched to the code
+  (`possible blocker, unverified` for ones the model labelled blocker). The
+  review posts findings as inline comments anchored on
   head-side diff lines where the cumulative diff permits and as file-level
   comments otherwise, with `REQUEST_CHANGES` for changes_required and
-  `COMMENT` for pass; a 422 on line anchoring retries once with every
-  comment at file level. Reviews are per-run and never deduplicated; an
+  `COMMENT` for pass or needs_attention; a 422 on line anchoring retries once with every
+  comment at file level. Excluded findings always post as file-level
+  comments marked unverified and never influence the review event, the
+  ledger, or the commit status. Reviews are per-run and never deduplicated; an
   incomplete decision posts no review. The comment is sticky: `finalize`
   lists the PR's comments first, patches the first `github-actions[bot]`
   comment carrying the `<!-- sentinel-review -->` marker, and posts a new
@@ -142,7 +150,7 @@ neutralizes `@` mentions.
 State files: `index.json` (strict `{schemaVersion:1, repository:'devrev/sentinel',
 pullRequests:<unique positive ints>}`) and `prs/N.json` (strict record with
 `stateVersion` `gha-<run>-<attempt>` pending, `${runId}-completed` finalized,
-`status` pending/pass/changes_required/incomplete, ledger with matching inner
+`status` pending/pass/needs_attention/changes_required/incomplete, ledger with matching inner
 repository/PR). Inconsistency fails closed; a PR absent from both is a valid
 new registration; a record without index listing or vice versa is corruption.
 Commits use a fixed sentinel identity with hooks disabled; pushes are normal
@@ -185,7 +193,11 @@ malformed page, and refuses after 20 full pages; only a marker comment
 authored by `github-actions[bot]` is patched. A `changes_required` decision
 posts a formal `REQUEST_CHANGES` review, which may affect mergeability
 depending on repository review settings; this code does not configure the
-status as a required check. Each run posts findings as a separate formal
+status as a required check. A `needs_attention` decision — open advisories or
+questions, or findings excluded as unverified, with no blocker — posts a
+`COMMENT` review and a `success` commit
+status whose description names the open-item count, so it never blocks
+merging while still not claiming a clean pass. Each run posts findings as a separate formal
 review, so repeated runs add more reviews.
 
 The ledger is persisted before publishing; a later publication failure fails
@@ -222,7 +234,13 @@ and allowed different-rule near misses are logged to the validation audit as
 `resolutionOverlaps`. Accepted `fixed` resolutions whose changed-line
 evidence lies outside the finding's files and their direct dependency
 neighbors are likewise logged as `fixedEvidenceOutsideScope` for
-shadow-period measurement. Known limits: the changed-line citation may come from
+shadow-period measurement. Citations the gate re-anchored to a unique match
+are logged as `citationAdjustments`, and findings excluded as unverifiable
+are logged as `unverifiedFindings` with id, title, severity, path, and
+reason. Unverified findings never enter the ledger, so an excluded possible
+blocker is visible only in that run's summary, comments, and audit; nothing
+carries it into the next review round unless the model raises it again.
+Known limits: the changed-line citation may come from
 any file, not only the finding's files or their import neighbors; the delta
 runs from the previous head to the current head, so upstream edits brought in
 by a merge or rebase also count as changed lines; and only head-side prior

@@ -288,19 +288,46 @@ test('a valid fabricated blocker report yields synthetic changes_required', (): 
   assert.equal(envelope.operational, false);
 });
 
-test('corrupted quote, wrong revision, and out-of-range citations are incomplete, never repaired', (): void => {
-  const corrupted = { ...HEAD_EVIDENCE, quote: 'export const required = true;' };
-  const wrongRevision = { ...HEAD_EVIDENCE, revision: 'base' };
-  const outOfRange = { ...HEAD_EVIDENCE, startLine: 2, endLine: 2 };
-  for (const [name, evidence] of Object.entries({ corrupted, wrongRevision, outOfRange })) {
+test('unverifiable quotes drop the finding while a unique drift re-anchors', (): void => {
+  // A quote absent from the cited source drops only that finding; the verdict
+  // comes from what verified. An unverified blocker never blocks the run.
+  for (const [name, evidence] of Object.entries({
+    corrupted: { ...HEAD_EVIDENCE, quote: 'export const required = true;' },
+    wrongRevision: { ...HEAD_EVIDENCE, revision: 'base' },
+  })) {
     const run = runPrepare(makeAgentRepo());
     const report = writeReport(run.a, agentReport(run.request, { findings: [blockerFinding(evidence)] }), name);
-    const result = cli(validateArgs(run, { report }, { out: path.join(run.a.tmp, `validated-${name}`) }));
-    assert.equal(result.status, 3, `${name}: ${result.stderr}`);
-    const envelope = JSON.parse(readFileSync(path.join(run.a.tmp, `validated-${name}`, 'decision.json'), 'utf8'));
-    assert.equal(envelope.decision.status, 'incomplete');
-    assert.match(envelope.decision.reasons.join(' '), /evidence absent/i);
+    const outDir = path.join(run.a.tmp, `validated-${name}`);
+    const result = cli(validateArgs(run, { report }, { out: outDir }));
+    assert.equal(result.status, 4, `${name}: ${result.stderr}`);
+    const envelope = JSON.parse(readFileSync(path.join(outDir, 'decision.json'), 'utf8'));
+    assert.equal(envelope.decision.status, 'needs_attention');
+    assert.equal(envelope.decision.ledger.openFindings.length, 0);
+    assert.equal(envelope.decision.unverifiedFindings.length, 1);
+    assert.equal(envelope.decision.unverifiedFindings[0].finding.id, 'F-1');
+    const audit = JSON.parse(readFileSync(path.join(outDir, 'validation-audit.json'), 'utf8'));
+    assert.equal(audit.unverifiedFindings[0].findingId, 'F-1');
   }
+  // A one-line-low citation whose quote appears exactly once re-anchors to it;
+  // this is the captured A6/B2 drift case and the finding still posts.
+  const run = runPrepare(makeAgentRepo());
+  const drifted = { ...HEAD_EVIDENCE, startLine: 2, endLine: 2 };
+  const report = writeReport(run.a, agentReport(run.request, { findings: [blockerFinding(drifted)] }));
+  const outDir = path.join(run.a.tmp, 'validated-drift');
+  const result = cli(validateArgs(run, { report }, { out: outDir }));
+  assert.equal(result.status, 2, result.stderr);
+  const envelope = JSON.parse(readFileSync(path.join(outDir, 'decision.json'), 'utf8'));
+  assert.equal(envelope.decision.status, 'changes_required');
+  assert.deepEqual(envelope.decision.citationAdjustments, [{
+    kind: 'finding',
+    findingId: 'F-1',
+    path: 'src/action.ts',
+    revision: 'head',
+    from: { startLine: 2, endLine: 2 },
+    to: { startLine: 1, endLine: 1 },
+  }]);
+  const audit = JSON.parse(readFileSync(path.join(outDir, 'validation-audit.json'), 'utf8'));
+  assert.equal(audit.citationAdjustments.length, 1);
 });
 
 test('stale current attestation, mutated prior-state version/ledger, and tampered request metadata are nonpass', (): void => {
@@ -704,14 +731,17 @@ test('renames resolve base source at the old path and deletions at merge base on
   assert.equal(cli(validateArgs(run, { report: blockerReport }, { out: renamedOut })).status, 2);
 
   // The old path at head is absent; citations never fall back across revisions.
+  // The finding cannot be verified and drops out of the verdict.
   const wrongOut = path.join(tmp, 'validated-wrong-rev');
   const wrongReport = writeReport(a, agentReport(run.request, {
     findings: [blockerFinding({ path: 'src/old.ts', revision: 'head', startLine: 1, endLine: 1, quote: 'export const v = 2;' })],
   }), 'report-wrong-rev.json');
   const wrong = cli(validateArgs(run, { report: wrongReport }, { out: wrongOut }));
-  assert.equal(wrong.status, 3);
+  assert.equal(wrong.status, 4, wrong.stderr);
   const wrongDecision = JSON.parse(readFileSync(path.join(wrongOut, 'decision.json'), 'utf8'));
-  assert.match(wrongDecision.decision.reasons.join(' '), /evidence absent/);
+  assert.equal(wrongDecision.decision.status, 'needs_attention');
+  assert.equal(wrongDecision.decision.unverifiedFindings.length, 1);
+  assert.equal(wrongDecision.decision.unverifiedFindings[0].reason, 'cited source is unavailable to this review');
 });
 
 test('base revision evidence resolves the merge base, not the advancing target branch head', (): void => {
@@ -740,15 +770,18 @@ test('base revision evidence resolves the merge base, not the advancing target b
   }), 'report-resolved.json');
   assert.equal(cli(validateArgs(run, { report: resolved }, { out: resolvedOut })).status, 2);
 
-  // Citing the target branch's newer content at revision base does not resolve.
+  // Citing the target branch's newer content at revision base never resolves;
+  // the quote is absent at merge base so the finding drops unverified.
   const staleOut = path.join(tmp, 'validated-stale');
   const stale = writeReport(a, agentReport(run.request, {
     findings: [blockerFinding({ path: 'src/action.ts', revision: 'base', startLine: 1, endLine: 1, quote: 'export const v = "advanced";' })],
   }), 'report-stale.json');
   const staleResult = cli(validateArgs(run, { report: stale }, { out: staleOut }));
-  assert.equal(staleResult.status, 3, staleResult.stderr);
+  assert.equal(staleResult.status, 4, staleResult.stderr);
   const staleDecision = JSON.parse(readFileSync(path.join(staleOut, 'decision.json'), 'utf8'));
-  assert.match(staleDecision.decision.reasons.join(' '), /evidence absent/);
+  assert.equal(staleDecision.decision.status, 'needs_attention');
+  assert.equal(staleDecision.decision.unverifiedFindings.length, 1);
+  assert.equal(staleDecision.decision.unverifiedFindings[0].finding.id, 'F-1');
 });
 
 test('a dirty working tree never substitutes for immutable commit objects', (): void => {

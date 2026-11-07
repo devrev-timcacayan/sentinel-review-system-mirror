@@ -7,7 +7,7 @@ import type { GateDecision, ReviewLedger, ReviewPolicy, ReviewSnapshot } from '.
 const REPOSITORY_KEY_PATTERN = /^([A-Za-z0-9][A-Za-z0-9_.-]*)\/([A-Za-z0-9][A-Za-z0-9_.-]*)$/;
 const RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/;
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
-const DECISION_STATUSES = new Set(['pass', 'changes_required', 'incomplete']);
+const DECISION_STATUSES = new Set(['pass', 'needs_attention', 'changes_required', 'incomplete']);
 
 export interface PrStore {
   repository: string;

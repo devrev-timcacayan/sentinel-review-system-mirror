@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { ALLOWED_REPOSITORY, loadTestPolicy, makeReport } from './helpers.ts';
-import type { ReviewLedger, ReviewSnapshot } from '../src/contracts.ts';
+import type { Finding, Reconciliation, ReviewLedger, ReviewSnapshot } from '../src/contracts.ts';
 import type { ProviderReply, ProviderRequest, ReviewProvider, ReviewProviderConfig } from '../src/providerTypes.ts';
 import { buildReviewBundle } from '../src/partitionPlanner.ts';
 import { projectPartition } from '../src/partitionContract.ts';
@@ -84,27 +84,46 @@ test('a counting or reservation failure releases every held uninvoked reservatio
 test('a failed repair reservation releases at zero and never touches held reservations', async (): Promise<void> => {
   const { snapshot, loaded } = parent(2);
   const [first] = snapshot.partitionManifest!.partitions;
+  const prior: Finding = {
+    id: 'f-prior',
+    ruleId: 'novel',
+    severity: 'advisory',
+    title: 'prior issue',
+    explanation: 'ex',
+    impact: 'im',
+    introducedBy: { path: 'src/root.ts', revision: 'head', startLine: 1, endLine: 1, quote: 'export const root = 2;' },
+    evidence: [{ path: 'src/root.ts', revision: 'head', startLine: 1, endLine: 1, quote: 'export const root = 2;' }],
+    counterEvidence: [],
+  };
+  const reconciliation = (quote: string): Reconciliation => ({
+    findingId: 'f-prior',
+    outcome: 'withdrawn',
+    rationale: 'no longer applies',
+    evidence: [{ path: 'src/root.ts', revision: 'head', startLine: 1, endLine: 1, quote }],
+  });
   const repairable = makeReport(projectPartition(snapshot, first), {
-    findings: [{
-      id: 'f-repair',
-      ruleId: 'novel',
-      severity: 'advisory',
-      title: 'issue',
-      explanation: 'ex',
-      impact: 'im',
-      introducedBy: { path: 'src/root.ts', revision: 'head', startLine: 1, endLine: 1, quote: 'export const root = 2;' },
-      evidence: [{ path: 'src/root.ts', revision: 'head', startLine: 1, endLine: 1, quote: 'INVENTED QUOTE' }],
-      counterEvidence: [],
-    }],
+    findings: [],
+    reconciliations: [reconciliation('INVENTED QUOTE')],
+  });
+  const secondPart = snapshot.partitionManifest!.partitions[1];
+  const clean = makeReport(projectPartition(snapshot, secondPart), {
+    findings: [],
+    reconciliations: [reconciliation('export const root = 2;')],
   });
   let invokes = 0;
-  const result = await runPartitionReview(snapshot, ledger(), loaded, provider(
-    async (request: ProviderRequest): Promise<number> => (request.phase === 'repair' ? 5 : 10),
-    async (request: ProviderRequest): Promise<ProviderReply> => {
-      invokes += 1;
-      return wrapped(snapshot, request.partitionId, request.partitionId === first.id ? repairable : undefined);
-    },
-  ), { outputDirectory: path.join(mkdtempSync(path.join(tmpdir(), 'srs-guard1b-')), 'out'), maxSpendMicros: 2020, execute: false });
+  const result = await runPartitionReview(
+    snapshot,
+    { ...ledger(), openFindings: [structuredClone(prior)] },
+    loaded,
+    provider(
+      async (request: ProviderRequest): Promise<number> => (request.phase === 'repair' ? 5 : 10),
+      async (request: ProviderRequest): Promise<ProviderReply> => {
+        invokes += 1;
+        return wrapped(snapshot, request.partitionId, request.partitionId === first.id ? repairable : clean);
+      },
+    ),
+    { outputDirectory: path.join(mkdtempSync(path.join(tmpdir(), 'srs-guard1b-')), 'out'), maxSpendMicros: 2020, execute: false },
+  );
   const repair = result.attempts.find((attempt) => attempt.phase === 'repair');
   assert.ok(repair, 'the repair attempt must be recorded');
   assert.equal(repair.status, 'failed');
